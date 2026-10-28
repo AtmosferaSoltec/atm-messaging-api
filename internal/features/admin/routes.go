@@ -40,6 +40,8 @@ func RegisterRoutes(group *gin.RouterGroup, handler *Handler, auth *AuthService)
 	protected.DELETE("/sessions/:id", handler.DeleteSession)
 
 	protected.GET("/messages", handler.ListMessages)
+	protected.POST("/messages", handler.SendMessage)
+	protected.GET("/messages/:id", handler.GetMessage)
 	protected.GET("/metrics", handler.Metrics)
 	protected.GET("/metrics/activity", handler.Activity)
 }

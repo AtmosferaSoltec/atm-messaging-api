@@ -37,6 +37,13 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	// One server per database: a WhatsApp device can only be connected from one place.
+	releaseLock, err := database.AcquireInstanceLock(ctx, pool)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
+
 	// The WhatsApp manager reports events to the session service, which is built
 	// right after; events only start once a session is paired or restored.
 	var sessions *session.Service

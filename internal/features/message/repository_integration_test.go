@@ -92,6 +92,22 @@ func TestMessageRepositoryAgainstPostgres(t *testing.T) {
 		t.Fatalf("another tenant must not see the message, got %v", err)
 	}
 
+	if got, err := repo.FindByIDUnscoped(ctx, first.ID); err != nil || got.ID != first.ID {
+		t.Fatalf("unscoped find (admin): %+v %v", got, err)
+	}
+
+	// Video and audio are valid message types in the database too.
+	for _, kind := range []channel.MessageKind{channel.KindVideo, channel.KindAudio} {
+		media := newMessage(tenantID, sessionID, PriorityTransactional, "")
+		media.Kind = kind
+		if _, _, err := repo.Insert(ctx, media, []byte("bytes")); err != nil {
+			t.Fatalf("%s messages must be accepted by the schema: %v", kind, err)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM messages WHERE id = $1`, media.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Queue order: transactional before promotional, even if older.
 	promo := newMessage(tenantID, sessionID, PriorityPromotional, "")
 	if _, _, err := repo.Insert(ctx, promo, nil); err != nil {

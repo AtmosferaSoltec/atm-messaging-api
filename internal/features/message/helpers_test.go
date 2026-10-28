@@ -59,6 +59,16 @@ func (f *fakeRepository) FindByID(_ context.Context, tenantID, id uuid.UUID) (Me
 	return *m, nil
 }
 
+func (f *fakeRepository) FindByIDUnscoped(_ context.Context, id uuid.UUID) (Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.messages[id]
+	if !ok {
+		return Message{}, ErrNotFound
+	}
+	return *m, nil
+}
+
 func (f *fakeRepository) PeekNext(_ context.Context, sessionID uuid.UUID) (Message, bool, *time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

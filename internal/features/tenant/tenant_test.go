@@ -17,7 +17,20 @@ type fakeRepository struct {
 
 func newFakeRepository() *fakeRepository { return &fakeRepository{byHash: map[string]Tenant{}} }
 
+// nameTaken mimics the case-insensitive unique index on tenant names.
+func (f *fakeRepository) nameTaken(name string, except uuid.UUID) bool {
+	for _, t := range f.byHash {
+		if t.ID != except && strings.EqualFold(strings.TrimSpace(t.Name), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeRepository) Create(_ context.Context, t Tenant, hash string) error {
+	if f.nameTaken(t.Name, uuid.Nil) {
+		return ErrNameTaken
+	}
 	f.byHash[hash] = t
 	return nil
 }
@@ -51,6 +64,9 @@ func (f *fakeRepository) Update(_ context.Context, id uuid.UUID, name *string, i
 	for hash, t := range f.byHash {
 		if t.ID == id {
 			if name != nil {
+				if f.nameTaken(*name, id) {
+					return Tenant{}, ErrNameTaken
+				}
 				t.Name = *name
 			}
 			if isActive != nil {
@@ -229,5 +245,33 @@ func TestUpdateTenant(t *testing.T) {
 	blank := "   "
 	if _, err := service.Update(context.Background(), created.Tenant.ID, &blank, nil); err != ErrInvalidName {
 		t.Errorf("expected ErrInvalidName, got %v", err)
+	}
+}
+
+func TestTenantNamesAreUniqueIgnoringCaseAndSpaces(t *testing.T) {
+	service := NewService(newFakeRepository())
+	ctx := context.Background()
+
+	first, err := service.Create(ctx, "La Vendimia")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"La Vendimia", "la vendimia", "  LA VENDIMIA  "} {
+		if _, err := service.Create(ctx, name); err != ErrNameTaken {
+			t.Errorf("%q: expected ErrNameTaken, got %v", name, err)
+		}
+	}
+
+	other, err := service.Create(ctx, "Iris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taken := "la vendimia"
+	if _, err := service.Update(ctx, other.Tenant.ID, &taken, nil); err != ErrNameTaken {
+		t.Errorf("renaming onto an existing name must fail, got %v", err)
+	}
+	same := "LA VENDIMIA"
+	if _, err := service.Update(ctx, first.Tenant.ID, &same, nil); err != nil {
+		t.Errorf("a tenant may change the case of its own name: %v", err)
 	}
 }

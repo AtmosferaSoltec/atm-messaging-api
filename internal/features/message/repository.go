@@ -21,6 +21,8 @@ type Repository interface {
 	// used the idempotency key, it returns the existing message and created=false.
 	Insert(ctx context.Context, m Message, attachment []byte) (stored Message, created bool, err error)
 	FindByID(ctx context.Context, tenantID, id uuid.UUID) (Message, error)
+	// FindByIDUnscoped serves the administration panel, which sees every tenant.
+	FindByIDUnscoped(ctx context.Context, id uuid.UUID) (Message, error)
 
 	// PeekNext returns the next queued message of a session that is due, without
 	// claiming it: transactional first, then oldest first. When none is due,
@@ -147,6 +149,10 @@ func (r *pgRepository) Insert(ctx context.Context, m Message, attachment []byte)
 
 func (r *pgRepository) FindByID(ctx context.Context, tenantID, id uuid.UUID) (Message, error) {
 	return scanMessage(r.pool.QueryRow(ctx, selectMessage+` WHERE tenant_id = $1 AND id = $2`, tenantID, id))
+}
+
+func (r *pgRepository) FindByIDUnscoped(ctx context.Context, id uuid.UUID) (Message, error) {
+	return scanMessage(r.pool.QueryRow(ctx, selectMessage+` WHERE id = $1`, id))
 }
 
 func (r *pgRepository) PeekNext(ctx context.Context, sessionID uuid.UUID) (Message, bool, *time.Time, error) {

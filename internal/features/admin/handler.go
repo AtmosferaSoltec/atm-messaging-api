@@ -45,6 +45,8 @@ type SessionService interface {
 
 // MessageService reads messages across tenants.
 type MessageService interface {
+	Send(ctx context.Context, tenantID uuid.UUID, req message.SendRequest) (message.Message, error)
+	GetAny(ctx context.Context, id uuid.UUID) (message.Message, error)
 	ListAll(ctx context.Context, filter message.Filter) ([]message.Message, error)
 	CountByStatusSince(ctx context.Context, tenantID *uuid.UUID, since time.Time) (map[message.Status]int, error)
 	QueueDepth(ctx context.Context, tenantID *uuid.UUID) (int, error)
@@ -575,6 +577,80 @@ type MessageResponse struct {
 	ReadAt      *time.Time `json:"read_at"`
 }
 
+func newMessageResponse(m message.Message) MessageResponse {
+	return MessageResponse{
+		ID: m.ID.String(), TenantID: m.TenantID.String(), SessionID: m.SessionID.String(), Channel: string(m.Channel),
+		To: m.Recipient, Type: string(m.Kind), Priority: string(m.Priority), Status: string(m.Status),
+		Attempts: m.Attempts, Error: m.Error, CreatedAt: m.CreatedAt, SentAt: m.SentAt,
+		DeliveredAt: m.DeliveredAt, ReadAt: m.ReadAt,
+	}
+}
+
+// GetMessage handles GET /admin/v1/messages/:id.
+func (h *Handler) GetMessage(c *gin.Context) {
+	id, ok := parseUUID(c, "id", "message_not_found")
+	if !ok {
+		return
+	}
+	m, err := h.messages.GetAny(c.Request.Context(), id)
+	if err != nil {
+		apierror.Write(c, translate(err))
+		return
+	}
+	c.JSON(http.StatusOK, newMessageResponse(m))
+}
+
+// SendMessageRequest is the body of POST /admin/v1/messages.
+type SendMessageRequest struct {
+	SessionID  string                     `json:"session_id"`
+	To         string                     `json:"to"`
+	Type       string                     `json:"type"`
+	Body       string                     `json:"body"`
+	Priority   string                     `json:"priority"`
+	Attachment *message.AttachmentRequest `json:"attachment"`
+}
+
+// maxSendBody bounds the JSON body: a 16 MiB attachment grows by a third in base64.
+const maxSendBody = 24 << 20
+
+// SendMessage handles POST /admin/v1/messages: the operator sends a message from a
+// connection (to try it out). It goes through the same validation, queue and
+// limits as a tenant's message, and counts as that tenant's.
+func (h *Handler) SendMessage(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSendBody)
+
+	var req SendMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			apierror.Write(c, apierror.New(http.StatusRequestEntityTooLarge, "request_too_large", "request body is too large"))
+			return
+		}
+		apierror.Write(c, apierror.BadRequest("invalid_request", "request body is not valid JSON"))
+		return
+	}
+	sessionID, err := uuid.Parse(req.SessionID)
+	if err != nil {
+		apierror.Write(c, apierror.BadRequest("invalid_session_id", "session_id must be a valid id"))
+		return
+	}
+	sess, err := h.sessions.Lookup(c.Request.Context(), sessionID)
+	if err != nil {
+		apierror.Write(c, translate(err))
+		return
+	}
+
+	msg, err := h.messages.Send(c.Request.Context(), sess.TenantID, message.SendRequest{
+		AccountRef: sess.AccountRef, Channel: string(sess.Channel), To: req.To, Type: req.Type,
+		Body: req.Body, Priority: req.Priority, Attachment: req.Attachment,
+	})
+	if err != nil {
+		apierror.Write(c, translate(err))
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"message_id": msg.ID.String(), "status": string(msg.Status)})
+}
+
 // defaultPageSize is the messages page size when the client does not ask for one.
 const defaultPageSize = 20
 
@@ -605,12 +681,7 @@ func (h *Handler) ListMessages(c *gin.Context) {
 	}
 	items := make([]MessageResponse, 0, len(messages))
 	for _, m := range messages {
-		items = append(items, MessageResponse{
-			ID: m.ID.String(), TenantID: m.TenantID.String(), SessionID: m.SessionID.String(), Channel: string(m.Channel),
-			To: m.Recipient, Type: string(m.Kind), Priority: string(m.Priority), Status: string(m.Status),
-			Attempts: m.Attempts, Error: m.Error, CreatedAt: m.CreatedAt, SentAt: m.SentAt,
-			DeliveredAt: m.DeliveredAt, ReadAt: m.ReadAt,
-		})
+		items = append(items, newMessageResponse(m))
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "has_more": hasMore})
 }
@@ -764,11 +835,24 @@ func queryInt(c *gin.Context, name string, fallback int) int {
 }
 
 func translate(err error) error {
+	var validation *message.ValidationError
 	switch {
+	case errors.As(err, &validation):
+		return apierror.BadRequest(validation.Code, validation.Message)
+	case errors.Is(err, message.ErrNotFound):
+		return apierror.NotFound("message_not_found", "message not found")
+	case errors.Is(err, message.ErrSessionNotConnected):
+		return apierror.Conflict("session_not_connected", "the session is not connected")
+	case errors.Is(err, message.ErrSessionNotFound):
+		return apierror.NotFound("session_not_found", "this account has no session for the channel")
+	case errors.Is(err, message.ErrRecipientOptedOut):
+		return apierror.New(http.StatusUnprocessableEntity, "recipient_opted_out", "the recipient opted out of promotional messages")
 	case errors.Is(err, tenant.ErrNotFound):
 		return apierror.NotFound("tenant_not_found", "tenant not found")
 	case errors.Is(err, tenant.ErrInvalidName):
 		return apierror.BadRequest("invalid_name", err.Error())
+	case errors.Is(err, tenant.ErrNameTaken):
+		return apierror.Conflict("tenant_name_taken", "a tenant with this name already exists")
 	case errors.Is(err, session.ErrNotFound):
 		return apierror.NotFound("session_not_found", "session not found")
 	case errors.Is(err, session.ErrSessionExists):

@@ -68,6 +68,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 
 - `POST   /v1/sessions` create session (body: `account_ref`, `channel`; 409 if the account already has one for that channel)
 - Auth: `Authorization: Bearer <api key>` on everything under `/v1`. `GET /health` is public.
+- Message types: `text`, `image` (jpeg/png/webp), `video` (mp4), `audio` (mp3/ogg, sent as an audio file, no caption) and `document` (pdf, docx, xlsx, pptx, txt, csv); max 16 MiB decoded. The file's real content must match its declared `mime_type`.
 - `POST /v1/messages` body: `account_ref`, `channel`, `to`, `type`, `body`, optional `priority`, `idempotency_key`, `attachment` `{filename, mime_type, content_base64}` (images jpeg/png/webp, documents pdf, max 16 MiB decoded)
 - `GET    /v1/sessions?account_ref=` list
 - `GET    /v1/sessions/{id}` status
@@ -77,7 +78,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 - `GET    /v1/messages/{id}` message status
 - `POST|GET /v1/sessions/{id}/opt-outs`, `DELETE /v1/sessions/{id}/opt-outs/{to}` manage the promotional unsubscribe list (promotional messages to them get 422)
 - Tenant webhook settings: `GET|PUT|DELETE /v1/webhook`, `POST /v1/webhook/test`, `GET /v1/webhook/events`
-- Admin API (`/admin/v1`, `Authorization: Bearer adm_...` from `POST /auth/login {username, password}`): `POST /auth/logout`, `GET /auth/me`; `GET|POST /tenants`, `GET|PATCH /tenants/{id}`, `POST /tenants/{id}/rotate-key`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `GET /messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=` (never returns bodies; returns `has_more`); `GET /metrics[?tenant_id=]`; `GET /metrics/activity` (last 24 hours, hour by hour); `GET|PUT|DELETE /tenants/{id}/webhook` and `POST /tenants/{id}/webhook/test`. `GET /tenants` includes `sessions_count` and `messages_last_24h`; sessions include `phone`. Login is throttled (5 failures / 15 min per IP and per user).
+- Admin API (`/admin/v1`, `Authorization: Bearer adm_...` from `POST /auth/login {username, password}`): `POST /auth/logout`, `GET /auth/me`; `GET|POST /tenants`, `GET|PATCH /tenants/{id}`, `POST /tenants/{id}/rotate-key`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `POST /messages` (the operator sends a test message through a connection: `session_id`, `to`, `type`, `body`, `priority`, `attachment`; same validation and queue as a tenant's) and `GET /messages/{id}` (status only); `GET /messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=` (never returns bodies; returns `has_more`); `GET /metrics[?tenant_id=]`; `GET /metrics/activity` (last 24 hours, hour by hour); `GET|PUT|DELETE /tenants/{id}/webhook` and `POST /tenants/{id}/webhook/test`. `GET /tenants` includes `sessions_count` and `messages_last_24h`; sessions include `phone`. Login is throttled (5 failures / 15 min per IP and per user).
 - Public connect page API (no auth; the token in the URL is the credential): `GET /public/connect/{token}` (label, channel, status, expiry; no internal ids) and `GET /public/connect/{token}/qr/stream` (SSE: `qr`, `connected`, `closed`). Links are 256-bit random, stored hashed, expire (`CONNECT_LINK_TTL`, default 24h), belong to one session and can do nothing else. Opening the stream of an unlinked session starts a new pairing.
 - Webhooks: `session.connected`, `session.disconnected`, `message.sent`, `message.delivered`, `message.read`, `message.failed`
 
@@ -94,6 +95,11 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 5. ~~Admin endpoints for the React panel~~ (implemented): `/admin/v1` with a single operator whose `ADMIN_USER`/`ADMIN_PASSWORD` live in `.env` (no user table, no JWT); login returns an opaque in-memory token (`adm_...`), separate from tenant API keys. Customers never get an account: the operator sends them a public connect link (`/public/connect/{token}`, see below).
 
 **Before each phase, propose the plan in a few lines and wait for approval.**
+
+## Operating rules
+
+- **One server per database.** The server takes a PostgreSQL advisory lock at startup and refuses to start if another instance already holds it: a WhatsApp device can only be connected from one place, and two servers would keep kicking each other off. Never point a second instance (tests, a copy) at a database that has real paired sessions; use `messaging_test` for experiments.
+- Tenant names are unique ignoring case and surrounding spaces (`tenant_name_taken`, 409).
 
 ## Development rules
 

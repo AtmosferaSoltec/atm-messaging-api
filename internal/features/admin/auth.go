@@ -19,17 +19,15 @@ import (
 )
 
 const (
-	tokenPrefix      = "adm_"
-	tokenBytes       = 32
-	minPasswordChars = 12
-	maxCredential    = 256
+	tokenPrefix   = "adm_"
+	tokenBytes    = 32
+	maxCredential = 256
 )
 
 // Errors returned by the AuthService.
 var (
 	ErrInvalidCredentials = errors.New("invalid username or password")
 	ErrInvalidToken       = errors.New("invalid or expired token")
-	ErrWeakPassword       = errors.New("ADMIN_PASSWORD must be at least 12 characters")
 )
 
 // User is the operator of the panel.
@@ -62,8 +60,9 @@ func NewAuthService(username, password string, tokenTTL time.Duration) (*AuthSer
 	if username == "" {
 		return nil, errors.New("ADMIN_USER is required")
 	}
-	if len(password) < minPasswordChars {
-		return nil, ErrWeakPassword
+	// Any non-empty password is accepted: no length or character rules.
+	if password == "" {
+		return nil, errors.New("ADMIN_PASSWORD is required")
 	}
 	return &AuthService{
 		username:       username,

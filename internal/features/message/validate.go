@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/channel"
@@ -17,16 +18,43 @@ const (
 	maxFilenameLength = 255
 )
 
-// allowedMimeTypes lists what each attachment kind accepts. The declared type
-// must also match the file's real content.
-var allowedMimeTypes = map[channel.MessageKind]map[string]string{
+// attachmentSpec describes an accepted file type: the extension used when the
+// request gives no filename, and what the file's real content must look like.
+type attachmentSpec struct {
+	extension string
+	// sniffed lists the media types http.DetectContentType may report for a
+	// genuine file of this type. Office files are ZIP containers, for example.
+	sniffed []string
+}
+
+const (
+	mimeDocx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	mimeXlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	mimePptx = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+)
+
+// allowedAttachments lists what each message kind accepts. The declared type must
+// also match the file's real content, so a renamed file is rejected.
+var allowedAttachments = map[channel.MessageKind]map[string]attachmentSpec{
 	channel.KindImage: {
-		"image/jpeg": ".jpg",
-		"image/png":  ".png",
-		"image/webp": ".webp",
+		"image/jpeg": {".jpg", []string{"image/jpeg"}},
+		"image/png":  {".png", []string{"image/png"}},
+		"image/webp": {".webp", []string{"image/webp"}},
+	},
+	channel.KindVideo: {
+		"video/mp4": {".mp4", []string{"video/mp4"}},
+	},
+	channel.KindAudio: {
+		"audio/mpeg": {".mp3", []string{"audio/mpeg"}},
+		"audio/ogg":  {".ogg", []string{"application/ogg", "audio/ogg"}},
 	},
 	channel.KindDocument: {
-		"application/pdf": ".pdf",
+		"application/pdf": {".pdf", []string{"application/pdf"}},
+		"text/plain":      {".txt", []string{"text/plain"}},
+		"text/csv":        {".csv", []string{"text/plain"}},
+		mimeDocx:          {".docx", []string{"application/zip"}},
+		mimeXlsx:          {".xlsx", []string{"application/zip"}},
+		mimePptx:          {".pptx", []string{"application/zip"}},
 	},
 }
 
@@ -68,9 +96,9 @@ func validate(req SendRequest) (validated, error) {
 
 	v.kind = channel.MessageKind(req.Type)
 	switch v.kind {
-	case channel.KindText, channel.KindImage, channel.KindDocument:
+	case channel.KindText, channel.KindImage, channel.KindVideo, channel.KindAudio, channel.KindDocument:
 	default:
-		return v, invalid("invalid_type", "type must be text, image or document")
+		return v, invalid("invalid_type", "type must be text, image, video, audio or document")
 	}
 
 	switch Priority(req.Priority) {
@@ -93,6 +121,9 @@ func validate(req SendRequest) (validated, error) {
 		return v, nil
 	}
 
+	if v.kind == channel.KindAudio && v.body != "" {
+		return v, invalid("invalid_body", "audio messages cannot have a caption")
+	}
 	if len(v.body) > maxCaptionLength {
 		return v, invalid("invalid_body", "caption must be at most 1024 characters")
 	}
@@ -109,8 +140,7 @@ func validateAttachment(kind channel.MessageKind, req *AttachmentRequest) (*chan
 		return nil, invalid("attachment_required", "image and document messages require an attachment")
 	}
 
-	allowed := allowedMimeTypes[kind]
-	extension, ok := allowed[req.MimeType]
+	spec, ok := allowedAttachments[kind][req.MimeType]
 	if !ok {
 		return nil, invalid("unsupported_attachment_type", "attachment mime_type is not allowed for this message type")
 	}
@@ -125,13 +155,15 @@ func validateAttachment(kind channel.MessageKind, req *AttachmentRequest) (*chan
 	if len(data) > maxAttachmentSize {
 		return nil, invalid("attachment_too_large", "attachment exceeds the 16 MiB limit")
 	}
-	if http.DetectContentType(data) != req.MimeType {
+	// DetectContentType may add parameters ("text/plain; charset=utf-8"); only the media type matters.
+	detected, _, _ := strings.Cut(http.DetectContentType(data), ";")
+	if !slices.Contains(spec.sniffed, strings.TrimSpace(detected)) {
 		return nil, invalid("attachment_type_mismatch", "attachment content does not match its mime_type")
 	}
 
 	filename := filepath.Base(strings.TrimSpace(req.Filename))
 	if filename == "." || filename == "/" || filename == "" {
-		filename = "file" + extension
+		filename = "file" + spec.extension
 	}
 	if len(filename) > maxFilenameLength {
 		return nil, invalid("invalid_filename", "filename must be at most 255 characters")

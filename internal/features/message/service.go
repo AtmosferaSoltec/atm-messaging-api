@@ -167,3 +167,8 @@ func (s *Service) QueueDepth(ctx context.Context, tenantID *uuid.UUID) (int, err
 func (s *Service) HourlyActivity(ctx context.Context, tenantID *uuid.UUID, since time.Time) ([]HourlyCount, error) {
 	return s.repo.HourlyActivity(ctx, tenantID, since)
 }
+
+// GetAny returns a message whichever tenant owns it, for administration.
+func (s *Service) GetAny(ctx context.Context, id uuid.UUID) (Message, error) {
+	return s.repo.FindByIDUnscoped(ctx, id)
+}

@@ -7,11 +7,27 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ErrNotFound is returned when no tenant matches.
-var ErrNotFound = errors.New("tenant not found")
+// Errors returned by the Repository.
+var (
+	ErrNotFound  = errors.New("tenant not found")
+	ErrNameTaken = errors.New("a tenant with this name already exists")
+)
+
+const (
+	uniqueViolation = "23505"
+	nameUniqueIndex = "tenants_name_lower_key"
+)
+
+// isNameTaken reports whether err is the unique-name violation (names are
+// compared ignoring case and surrounding spaces).
+func isNameTaken(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation && pgErr.ConstraintName == nameUniqueIndex
+}
 
 // Repository stores tenants.
 type Repository interface {
@@ -40,6 +56,9 @@ func (r *pgRepository) Create(ctx context.Context, t Tenant, apiKeyHash string) 
 		INSERT INTO tenants (id, name, api_key_prefix, api_key_hash, webhook_secret, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		t.ID, t.Name, t.APIKeyPrefix, apiKeyHash, t.WebhookSecret, t.IsActive)
+	if isNameTaken(err) {
+		return ErrNameTaken
+	}
 	if err != nil {
 		return fmt.Errorf("insert tenant: %w", err)
 	}
@@ -92,11 +111,15 @@ func (r *pgRepository) List(ctx context.Context) ([]Tenant, error) {
 }
 
 func (r *pgRepository) Update(ctx context.Context, id uuid.UUID, name *string, isActive *bool) (Tenant, error) {
-	return scanTenant(r.pool.QueryRow(ctx, `
+	t, err := scanTenant(r.pool.QueryRow(ctx, `
 		UPDATE tenants SET name = COALESCE($2, name), is_active = COALESCE($3, is_active), updated_at = now()
 		WHERE id = $1
 		RETURNING id, name, api_key_prefix, webhook_secret, COALESCE(webhook_url, ''), is_active, created_at`,
 		id, name, isActive))
+	if isNameTaken(err) {
+		return Tenant{}, ErrNameTaken
+	}
+	return t, err
 }
 
 func (r *pgRepository) UpdateWebhookURL(ctx context.Context, id uuid.UUID, url string) error {

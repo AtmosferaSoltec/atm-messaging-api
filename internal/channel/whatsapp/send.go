@@ -60,6 +60,40 @@ func buildContent(ctx context.Context, client *whatsmeow.Client, msg channel.Out
 			Caption:       optionalString(msg.Body),
 		}}, nil
 
+	case channel.KindVideo:
+		upload, err := upload(ctx, client, msg.Attachment, whatsmeow.MediaVideo)
+		if err != nil {
+			return nil, err
+		}
+		return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+			URL:           proto.String(upload.URL),
+			DirectPath:    proto.String(upload.DirectPath),
+			MediaKey:      upload.MediaKey,
+			FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256:    upload.FileSHA256,
+			FileLength:    proto.Uint64(upload.FileLength),
+			Mimetype:      proto.String(msg.Attachment.MimeType),
+			Caption:       optionalString(msg.Body),
+		}}, nil
+
+	case channel.KindAudio:
+		upload, err := upload(ctx, client, msg.Attachment, whatsmeow.MediaAudio)
+		if err != nil {
+			return nil, err
+		}
+		// Sent as a regular audio file (with a player), not as a voice note: a voice
+		// note must be Opus, and an MP3 would not play.
+		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			URL:           proto.String(upload.URL),
+			DirectPath:    proto.String(upload.DirectPath),
+			MediaKey:      upload.MediaKey,
+			FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256:    upload.FileSHA256,
+			FileLength:    proto.Uint64(upload.FileLength),
+			Mimetype:      proto.String(msg.Attachment.MimeType),
+			PTT:           proto.Bool(false),
+		}}, nil
+
 	case channel.KindDocument:
 		upload, err := upload(ctx, client, msg.Attachment, whatsmeow.MediaDocument)
 		if err != nil {

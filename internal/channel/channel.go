@@ -25,6 +25,8 @@ type MessageKind string
 const (
 	KindText     MessageKind = "text"
 	KindImage    MessageKind = "image"
+	KindVideo    MessageKind = "video"
+	KindAudio    MessageKind = "audio"
 	KindDocument MessageKind = "document"
 )
 

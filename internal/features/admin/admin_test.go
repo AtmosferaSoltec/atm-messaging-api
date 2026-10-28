@@ -19,6 +19,7 @@ import (
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/session"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/tenant"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/webhook"
+	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/apierror"
 )
 
 const testPassword = "a-long-password-1"
@@ -34,11 +35,21 @@ func newTestAuth(t *testing.T) *AuthService {
 
 // ---- auth service ---------------------------------------------------------
 
-func TestNewAuthServiceRequiresStrongCredentials(t *testing.T) {
-	if _, err := NewAuthService("joel", "short", time.Hour); err != ErrWeakPassword {
-		t.Errorf("a short password must be rejected, got %v", err)
+func TestNewAuthServiceOnlyRequiresNonEmptyCredentials(t *testing.T) {
+	for _, password := range []string{"1234", "abc", "a", "simple password with spaces"} {
+		auth, err := NewAuthService("joel", password, time.Hour)
+		if err != nil {
+			t.Fatalf("%q: any non-empty password must be accepted, got %v", password, err)
+		}
+		if _, err := auth.Login(context.Background(), "joel", password); err != nil {
+			t.Errorf("%q: login with the configured password must work: %v", password, err)
+		}
 	}
-	if _, err := NewAuthService("  ", testPassword, time.Hour); err == nil {
+
+	if _, err := NewAuthService("joel", "", time.Hour); err == nil {
+		t.Error("an empty password must be rejected")
+	}
+	if _, err := NewAuthService("  ", "1234", time.Hour); err == nil {
 		t.Error("an empty user must be rejected")
 	}
 }
@@ -188,6 +199,7 @@ func (f *fakeTenants) RotateAPIKey(_ context.Context, id uuid.UUID) (tenant.Crea
 
 type fakeSessions struct {
 	disconnected []uuid.UUID
+	known        *session.Session
 }
 
 func (f *fakeSessions) Create(_ context.Context, tenantID uuid.UUID, accountRef string, ch channel.Type) (session.Session, error) {
@@ -208,7 +220,10 @@ func (f *fakeSessions) Disconnect(_ context.Context, id uuid.UUID) error {
 func (*fakeSessions) ListAll(context.Context, session.Filter) ([]session.Session, error) {
 	return nil, nil
 }
-func (*fakeSessions) Lookup(context.Context, uuid.UUID) (session.Session, error) {
+func (f *fakeSessions) Lookup(_ context.Context, id uuid.UUID) (session.Session, error) {
+	if f.known != nil && f.known.ID == id {
+		return *f.known, nil
+	}
 	return session.Session{}, session.ErrNotFound
 }
 func (*fakeSessions) DeleteAny(context.Context, uuid.UUID) error { return session.ErrNotFound }
@@ -230,9 +245,29 @@ func (f *fakeLinks) Create(_ context.Context, _ uuid.UUID, label string) (connec
 }
 
 type fakeMessages struct {
+	sendErr    error
+	lastSend   message.SendRequest
+	lastTenant uuid.UUID
 	messages   []message.Message
 	lastFilter message.Filter
 	activity   []message.HourlyCount
+}
+
+func (f *fakeMessages) Send(_ context.Context, tenantID uuid.UUID, req message.SendRequest) (message.Message, error) {
+	f.lastTenant, f.lastSend = tenantID, req
+	if f.sendErr != nil {
+		return message.Message{}, f.sendErr
+	}
+	return message.Message{ID: uuid.New(), Status: message.StatusQueued}, nil
+}
+
+func (f *fakeMessages) GetAny(_ context.Context, id uuid.UUID) (message.Message, error) {
+	for _, m := range f.messages {
+		if m.ID == id {
+			return m, nil
+		}
+	}
+	return message.Message{}, message.ErrNotFound
 }
 
 func (f *fakeMessages) ListAll(_ context.Context, filter message.Filter) ([]message.Message, error) {
@@ -338,7 +373,7 @@ func TestEveryAdminRouteExceptLoginRequiresAToken(t *testing.T) {
 		{"PUT", "/admin/v1/tenants/" + id + "/webhook"}, {"DELETE", "/admin/v1/tenants/" + id + "/webhook"},
 		{"GET", "/admin/v1/tenants/" + id + "/webhook/events"},
 		{"GET", "/admin/v1/sessions"}, {"GET", "/admin/v1/sessions/" + id}, {"DELETE", "/admin/v1/sessions/" + id},
-		{"GET", "/admin/v1/messages"}, {"GET", "/admin/v1/metrics"}, {"GET", "/admin/v1/metrics/activity"},
+		{"GET", "/admin/v1/messages"}, {"POST", "/admin/v1/messages"}, {"GET", "/admin/v1/messages/" + id}, {"GET", "/admin/v1/metrics"}, {"GET", "/admin/v1/metrics/activity"},
 		{"GET", "/admin/v1/tenants/" + id + "/webhook"}, {"POST", "/admin/v1/tenants/" + id + "/webhook/test"},
 	}
 	for _, r := range routes {
@@ -681,5 +716,80 @@ func TestSessionResponseIncludesThePhone(t *testing.T) {
 	s := session.Session{ID: uuid.New(), TenantID: uuid.New(), AccountRef: "e1", ChannelRef: "51936416623:7@s.whatsapp.net"}
 	if got := newSessionResponse(s).Phone; got != "51936416623" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestOperatorSendsAMessageThroughAConnection(t *testing.T) {
+	a := newAPI(t)
+	token := a.login(t)
+	tenantID := uuid.New()
+	sess := session.Session{ID: uuid.New(), TenantID: tenantID, AccountRef: "empresa-1", Channel: channel.WhatsApp, Status: session.StatusConnected}
+	a.sessions.known = &sess
+
+	body := map[string]any{
+		"session_id": sess.ID.String(), "to": "51936416623", "type": "document", "body": "Tu boleta", "priority": "promotional",
+		"attachment": map[string]string{"filename": "boleta.pdf", "mime_type": "application/pdf", "content_base64": "JVBERi0="},
+	}
+	rec := a.do(http.MethodPost, "/admin/v1/messages", token, body)
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"status":"queued"`) {
+		t.Fatalf("expected 202 queued, got %d %s", rec.Code, rec.Body)
+	}
+
+	got := a.messages.lastSend
+	if a.messages.lastTenant != tenantID || got.AccountRef != "empresa-1" || got.Channel != "whatsapp" ||
+		got.To != "51936416623" || got.Type != "document" || got.Priority != "promotional" || got.Attachment == nil || got.Attachment.Filename != "boleta.pdf" {
+		t.Errorf("the message must go out as the session's tenant and account: tenant=%v %+v", a.messages.lastTenant, got)
+	}
+}
+
+func TestOperatorSendErrorsAreTranslated(t *testing.T) {
+	a := newAPI(t)
+	token := a.login(t)
+	sess := session.Session{ID: uuid.New(), TenantID: uuid.New(), AccountRef: "e1", Channel: channel.WhatsApp}
+	a.sessions.known = &sess
+	send := func(sessionID string) *httptest.ResponseRecorder {
+		return a.do(http.MethodPost, "/admin/v1/messages", token, map[string]any{"session_id": sessionID, "to": "51936416623", "type": "text", "body": "x"})
+	}
+
+	if rec := send("not-a-uuid"); rec.Code != http.StatusBadRequest {
+		t.Errorf("malformed session id: %d", rec.Code)
+	}
+	if rec := send(uuid.NewString()); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown session: %d", rec.Code)
+	}
+
+	cases := map[error]int{
+		message.ErrSessionNotConnected:                                      http.StatusConflict,
+		message.ErrRecipientOptedOut:                                        http.StatusUnprocessableEntity,
+		&message.ValidationError{Code: "invalid_recipient", Message: "bad"}: http.StatusBadRequest,
+	}
+	for err, want := range cases {
+		a.messages.sendErr = err
+		if rec := send(sess.ID.String()); rec.Code != want {
+			t.Errorf("%v: expected %d, got %d (%s)", err, want, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestOperatorCanFollowAMessage(t *testing.T) {
+	a := newAPI(t)
+	token := a.login(t)
+	msg := message.Message{ID: uuid.New(), Status: message.StatusDelivered, Recipient: "51936416623", Body: "SENSITIVE"}
+	a.messages.messages = []message.Message{msg}
+
+	rec := a.do(http.MethodGet, "/admin/v1/messages/"+msg.ID.String(), token, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"delivered"`) || strings.Contains(rec.Body.String(), "SENSITIVE") {
+		t.Errorf("status without content expected, got %d %s", rec.Code, rec.Body)
+	}
+	if rec := a.do(http.MethodGet, "/admin/v1/messages/"+uuid.NewString(), token, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown message: %d", rec.Code)
+	}
+}
+
+func TestDuplicateTenantNameIsAConflict(t *testing.T) {
+	if got := translate(tenant.ErrNameTaken); got == nil {
+		t.Fatal("expected a translated error")
+	} else if apiErr, ok := got.(*apierror.Error); !ok || apiErr.Status != http.StatusConflict || apiErr.Code != "tenant_name_taken" {
+		t.Errorf("unexpected translation %v", got)
 	}
 }
