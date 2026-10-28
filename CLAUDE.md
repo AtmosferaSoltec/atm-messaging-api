@@ -101,6 +101,10 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 - **One server per database.** The server takes a PostgreSQL advisory lock at startup and refuses to start if another instance already holds it: a WhatsApp device can only be connected from one place, and two servers would keep kicking each other off. Never point a second instance (tests, a copy) at a database that has real paired sessions; use `messaging_test` for experiments.
 - Tenant names are unique ignoring case and surrounding spaces (`tenant_name_taken`, 409).
 
+## Deploy
+
+Branches: work on `main`; merging into `production` triggers the GitHub Actions deploy (check → build → deploy over SSH). Domains `messaging-api.atmosferast.com` / `messaging.atmosferast.com`, folder `/opt/messaging-api`. Full guide, server setup and operating notes: [docs/despliegue.md](docs/despliegue.md). The production `.env` lives only on the server (template: `deploy/.env.production.example`).
+
 ## Development rules
 
 1. **Language**: all code, comments, identifiers, types, DB tables/columns, routes, JSON fields, package and file names in English. Only user-facing message text returned to the client may be in Spanish.

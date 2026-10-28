@@ -1,0 +1,131 @@
+name: Deploy
+
+on:
+  push:
+    branches: [production]
+  # Permite relanzar un despliegue (o volver a uno anterior) sin empujar un commit.
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-messaging-api
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/atmosferasoltec/atm-messaging-api
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+      - run: go test ./...
+      - run: go build ./...
+
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=messaging-api
+          cache-to: type=gha,scope=messaging-api,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy/docker-compose.yml
+          sparse-checkout-cone-mode: false
+
+      # Una sola conexion SSH (ControlMaster) para copiar el compose y desplegar,
+      # con reintentos al abrirla: si sshd o fail2ban cortan un handshake suelto
+      # (`ssh: handshake failed: EOF`), el despliegue no se cae por eso.
+      - name: Copy compose file and deploy on server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          IMAGE_TAG: sha-${{ github.sha }}
+          IMAGE_REPO: ${{ env.IMAGE }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          opts=(-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20
+            -o ServerAliveInterval=15 -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%C -o ControlPersist=120)
+          target="$SSH_USER@$SSH_HOST"
+
+          for attempt in 1 2 3 4 5; do
+            if ssh "${opts[@]}" "$target" true; then break; fi
+            if [ "$attempt" = 5 ]; then echo "::error::No se pudo abrir la conexion SSH tras 5 intentos"; exit 1; fi
+            echo "SSH fallo (intento $attempt); reintento en $((attempt * 10)) s"
+            sleep $((attempt * 10))
+          done
+
+          scp "${opts[@]}" deploy/docker-compose.yml "$target:/opt/messaging-api/docker-compose.yml"
+
+          # El login a GHCR vive en el servidor (~/.docker/config.json). Si el
+          # pull da `denied`, renovarlo con `docker login ghcr.io` en el VPS.
+          ssh "${opts[@]}" "$target" "IMAGE_TAG=$IMAGE_TAG IMAGE_REPO=$IMAGE_REPO bash -s" <<'REMOTE'
+          set -e
+          cd /opt/messaging-api
+
+          if [ ! -f .env ]; then
+            echo "::error::Falta /opt/messaging-api/.env en el servidor"
+            exit 1
+          fi
+
+          export IMAGE_TAG IMAGE_REPO
+          docker compose pull
+          docker compose up -d
+          # Remove this project's previous images (no rollback copies are kept). `docker rmi`
+          # refuses an image a container still uses; cleanup must never fail the deploy.
+          for repo in "$IMAGE_REPO" "$IMAGE_REPO-migrate"; do
+            docker images "$repo" --format '{{.Repository}}:{{.Tag}}' \
+              | grep -v ":${IMAGE_TAG}$" | xargs -r docker rmi || true
+          done
+          docker image prune -f || true
+
+          for _ in $(seq 1 60); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' messaging-api 2>/dev/null || echo missing)"
+            if [ "$status" = "healthy" ]; then
+              echo "messaging-api esta healthy (${IMAGE_TAG})."
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::messaging-api no quedo healthy en 120s (estado: ${status}). Ultimos logs:"
+          docker compose logs --tail 50 app migrate
+          exit 1
+          REMOTE

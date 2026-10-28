@@ -1,0 +1,53 @@
+# Production stack of the API. GitHub Actions copies it to /opt/messaging-api on
+# every deploy; it is not edited by hand on the server.
+#
+# It never builds: the image is compiled once in CI and published to GHCR. The
+# real .env lives only on the server (/opt/messaging-api/.env).
+#
+# No database here: PostgreSQL is a separate stack (`atm-postgres`), reachable
+# through the external network `atm-network`. In DATABASE_URL the host is the
+# container name, not localhost.
+
+networks:
+  shared:
+    name: atm-network
+    external: true
+
+services:
+  # Applies the pending migrations and exits. `app` does not start until this
+  # finishes well, so a broken migration blocks the deploy.
+  migrate:
+    image: ghcr.io/atmosferasoltec/atm-messaging-api:${IMAGE_TAG:-latest}
+    command: ["migrate", "up"]
+    env_file: .env
+    networks:
+      - shared
+    restart: "no"
+
+  app:
+    image: ghcr.io/atmosferasoltec/atm-messaging-api:${IMAGE_TAG:-latest}
+    container_name: messaging-api
+    env_file: .env
+    environment:
+      APP_ENV: production
+      HTTP_PORT: "8080"
+    # Loopback only: the host nginx is what publishes it.
+    ports:
+      - "127.0.0.1:3121:8080"
+    networks:
+      - shared
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # Time to drain requests, finish the send in progress and close the WhatsApp
+    # connections before Docker kills the process.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/app/api", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
