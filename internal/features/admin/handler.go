@@ -48,11 +48,14 @@ type MessageService interface {
 	ListAll(ctx context.Context, filter message.Filter) ([]message.Message, error)
 	CountByStatusSince(ctx context.Context, tenantID *uuid.UUID, since time.Time) (map[message.Status]int, error)
 	QueueDepth(ctx context.Context, tenantID *uuid.UUID) (int, error)
+	HourlyActivity(ctx context.Context, tenantID *uuid.UUID, since time.Time) ([]message.HourlyCount, error)
 }
 
 // WebhookService manages a tenant's webhook on its behalf.
 type WebhookService interface {
 	SetURL(ctx context.Context, tenantID uuid.UUID, url string) error
+	Config(ctx context.Context, tenantID uuid.UUID) (url, secret string, err error)
+	Notify(ctx context.Context, tenantID uuid.UUID, eventType string, data any) error
 	Recent(ctx context.Context, tenantID uuid.UUID, limit int) ([]webhook.Event, error)
 	CountByStatus(ctx context.Context, tenantID *uuid.UUID) (map[webhook.Status]int, error)
 }
@@ -181,18 +184,51 @@ func newCredentialsResponse(created tenant.Created) CredentialsResponse {
 	}
 }
 
+// TenantSummaryResponse is a tenant with its activity counters, for the listing.
+type TenantSummaryResponse struct {
+	TenantResponse
+	SessionsCount   int `json:"sessions_count"`
+	MessagesLast24h int `json:"messages_last_24h"`
+}
+
 // ListTenants handles GET /admin/v1/tenants.
 func (h *Handler) ListTenants(c *gin.Context) {
-	tenants, err := h.tenants.List(c.Request.Context())
+	ctx := c.Request.Context()
+	tenants, err := h.tenants.List(ctx)
 	if err != nil {
 		apierror.Write(c, err)
 		return
 	}
-	items := make([]TenantResponse, 0, len(tenants))
+
+	since := time.Now().Add(-24 * time.Hour)
+	items := make([]TenantSummaryResponse, 0, len(tenants))
 	for _, t := range tenants {
-		items = append(items, newTenantResponse(t))
+		id := t.ID
+		sessionCounts, err := h.sessions.CountByStatus(ctx, &id)
+		if err != nil {
+			apierror.Write(c, err)
+			return
+		}
+		messageCounts, err := h.messages.CountByStatusSince(ctx, &id, since)
+		if err != nil {
+			apierror.Write(c, err)
+			return
+		}
+		items = append(items, TenantSummaryResponse{
+			TenantResponse:  newTenantResponse(t),
+			SessionsCount:   sumCounts(sessionCounts),
+			MessagesLast24h: sumCounts(messageCounts),
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func sumCounts[K comparable](counts map[K]int) int {
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	return total
 }
 
 // CreateTenant handles POST /admin/v1/tenants.
@@ -295,6 +331,50 @@ func (h *Handler) DeleteTenantWebhook(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// WebhookConfigResponse is where a tenant's webhooks go and how they are signed.
+type WebhookConfigResponse struct {
+	URL    string `json:"url"`
+	Secret string `json:"secret"`
+}
+
+// GetTenantWebhook handles GET /admin/v1/tenants/:id/webhook. The operator can
+// read the signing secret to set up the tenant's receiver.
+func (h *Handler) GetTenantWebhook(c *gin.Context) {
+	id, ok := parseUUID(c, "id", "tenant_not_found")
+	if !ok {
+		return
+	}
+	url, secret, err := h.webhooks.Config(c.Request.Context(), id)
+	if err != nil {
+		apierror.Write(c, translate(err))
+		return
+	}
+	c.JSON(http.StatusOK, WebhookConfigResponse{URL: url, Secret: secret})
+}
+
+// TestTenantWebhook handles POST /admin/v1/tenants/:id/webhook/test: it queues a
+// webhook.test event so the receiver can be checked.
+func (h *Handler) TestTenantWebhook(c *gin.Context) {
+	id, ok := parseUUID(c, "id", "tenant_not_found")
+	if !ok {
+		return
+	}
+	url, _, err := h.webhooks.Config(c.Request.Context(), id)
+	if err != nil {
+		apierror.Write(c, translate(err))
+		return
+	}
+	if url == "" {
+		apierror.Write(c, apierror.Conflict("webhook_not_configured", "set a webhook url first"))
+		return
+	}
+	if err := h.webhooks.Notify(c.Request.Context(), id, webhook.TestEventType, gin.H{"message": "webhook test"}); err != nil {
+		apierror.Write(c, err)
+		return
+	}
+	c.Status(http.StatusAccepted)
+}
+
 // TenantWebhookEvents handles GET /admin/v1/tenants/:id/webhook/events.
 func (h *Handler) TenantWebhookEvents(c *gin.Context) {
 	id, ok := parseUUID(c, "id", "tenant_not_found")
@@ -322,6 +402,7 @@ type SessionResponse struct {
 	AccountRef       string     `json:"account_ref"`
 	Channel          string     `json:"channel"`
 	Status           string     `json:"status"`
+	Phone            string     `json:"phone"`
 	ConnectedAt      *time.Time `json:"connected_at"`
 	FirstConnectedAt *time.Time `json:"first_connected_at"`
 	CreatedAt        time.Time  `json:"created_at"`
@@ -330,8 +411,22 @@ type SessionResponse struct {
 func newSessionResponse(s session.Session) SessionResponse {
 	return SessionResponse{
 		ID: s.ID.String(), TenantID: s.TenantID.String(), AccountRef: s.AccountRef, Channel: string(s.Channel),
-		Status: string(s.Status), ConnectedAt: s.ConnectedAt, FirstConnectedAt: s.FirstConnectedAt, CreatedAt: s.CreatedAt,
+		Status: string(s.Status), Phone: phoneFromChannelRef(s.ChannelRef), ConnectedAt: s.ConnectedAt, FirstConnectedAt: s.FirstConnectedAt, CreatedAt: s.CreatedAt,
 	}
+}
+
+// phoneFromChannelRef extracts the phone number from a WhatsApp device ID such as
+// "51936416623:12@s.whatsapp.net". It returns "" when there is no usable number.
+func phoneFromChannelRef(ref string) string {
+	end := strings.IndexAny(ref, ":@")
+	if end < 0 {
+		end = len(ref)
+	}
+	digits := ref[:end]
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
+		return ""
+	}
+	return digits
 }
 
 // ListSessions handles GET /admin/v1/sessions?tenant_id=&status=&account_ref=&limit=&offset=.
@@ -480,7 +575,11 @@ type MessageResponse struct {
 	ReadAt      *time.Time `json:"read_at"`
 }
 
-// ListMessages handles GET /admin/v1/messages?tenant_id=&session_id=&status=&limit=&offset=.
+// defaultPageSize is the messages page size when the client does not ask for one.
+const defaultPageSize = 20
+
+// ListMessages handles GET /admin/v1/messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=.
+// It returns one extra row internally to tell whether another page exists.
 func (h *Handler) ListMessages(c *gin.Context) {
 	tenantID, ok := optionalUUID(c, "tenant_id")
 	if !ok {
@@ -490,13 +589,19 @@ func (h *Handler) ListMessages(c *gin.Context) {
 	if !ok {
 		return
 	}
+	pageSize := min(max(queryInt(c, "limit", defaultPageSize), 1), 200)
 	messages, err := h.messages.ListAll(c.Request.Context(), message.Filter{
 		TenantID: tenantID, SessionID: sessionID, Status: message.Status(c.Query("status")),
-		Limit: queryInt(c, "limit", 100), Offset: queryInt(c, "offset", 0),
+		Priority: message.Priority(c.Query("priority")), Recipient: digitsOnly(c.Query("q")),
+		Limit: pageSize + 1, Offset: queryInt(c, "offset", 0),
 	})
 	if err != nil {
 		apierror.Write(c, err)
 		return
+	}
+	hasMore := len(messages) > pageSize
+	if hasMore {
+		messages = messages[:pageSize]
 	}
 	items := make([]MessageResponse, 0, len(messages))
 	for _, m := range messages {
@@ -507,7 +612,17 @@ func (h *Handler) ListMessages(c *gin.Context) {
 			DeliveredAt: m.DeliveredAt, ReadAt: m.ReadAt,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	c.JSON(http.StatusOK, gin.H{"items": items, "has_more": hasMore})
+}
+
+func digitsOnly(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ---- metrics --------------------------------------------------------------
@@ -568,6 +683,43 @@ func (h *Handler) Metrics(c *gin.Context) {
 		response["tenants"] = gin.H{"total": len(tenants), "active": active}
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+// ActivityPoint is one hour of message activity.
+type ActivityPoint struct {
+	Hour   time.Time `json:"hour"`
+	Sent   int       `json:"sent"`
+	Failed int       `json:"failed"`
+}
+
+const activityHours = 24
+
+// Activity handles GET /admin/v1/metrics/activity?tenant_id=: the last 24 hours,
+// hour by hour, with zeros for hours without messages so a chart needs no gaps logic.
+func (h *Handler) Activity(c *gin.Context) {
+	tenantID, ok := optionalUUID(c, "tenant_id")
+	if !ok {
+		return
+	}
+	end := time.Now().UTC().Truncate(time.Hour)
+	start := end.Add(-(activityHours - 1) * time.Hour)
+
+	counts, err := h.messages.HourlyActivity(c.Request.Context(), tenantID, start)
+	if err != nil {
+		apierror.Write(c, err)
+		return
+	}
+	byHour := make(map[time.Time]message.HourlyCount, len(counts))
+	for _, count := range counts {
+		byHour[count.Hour.UTC().Truncate(time.Hour)] = count
+	}
+
+	items := make([]ActivityPoint, 0, activityHours)
+	for hour := start; !hour.After(end); hour = hour.Add(time.Hour) {
+		count := byHour[hour]
+		items = append(items, ActivityPoint{Hour: hour, Sent: count.Sent, Failed: count.Failed})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 func fillCounts[K ~string](counts map[K]int, statuses []K) map[string]int {

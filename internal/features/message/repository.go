@@ -44,6 +44,9 @@ type Repository interface {
 	ListFiltered(ctx context.Context, filter Filter) ([]Message, error)
 	CountByStatusSince(ctx context.Context, tenantID *uuid.UUID, since time.Time) (map[Status]int, error)
 	QueueDepth(ctx context.Context, tenantID *uuid.UUID) (int, error)
+	// HourlyActivity groups messages created since a time by hour. Hours without
+	// messages are absent; "sent" counts every message that left the queue successfully.
+	HourlyActivity(ctx context.Context, tenantID *uuid.UUID, since time.Time) ([]HourlyCount, error)
 
 	// RecoverSending requeues messages left in "sending" by a crash or shutdown.
 	RecoverSending(ctx context.Context) (int, error)
@@ -56,8 +59,18 @@ type Filter struct {
 	TenantID  *uuid.UUID
 	SessionID *uuid.UUID
 	Status    Status
+	Priority  Priority
+	// Recipient matches messages whose destination contains these digits.
+	Recipient string
 	Limit     int
 	Offset    int
+}
+
+// HourlyCount is how many messages were sent or failed during one hour.
+type HourlyCount struct {
+	Hour   time.Time
+	Sent   int
+	Failed int
 }
 
 // StatusUpdate is the final state of a message.
@@ -81,7 +94,7 @@ func NewRepository(pool *pgxpool.Pool) Repository {
 const selectMessage = `
 	SELECT id, tenant_id, session_id, channel, recipient, type, body, attachment_filename,
 	       attachment_mime, attachment_size, priority, COALESCE(idempotency_key, ''), status,
-	       attempts, error, provider_message_id, sent_at, created_at
+	       attempts, error, provider_message_id, sent_at, delivered_at, read_at, created_at
 	FROM messages`
 
 func scanMessage(row pgx.Row) (Message, error) {
@@ -245,9 +258,9 @@ func (r *pgRepository) ApplyReceipt(ctx context.Context, sessionID uuid.UUID, pr
 	// A read receipt also implies delivery, so delivered_at is filled when missing.
 	rows, err := r.pool.Query(ctx, `
 		UPDATE messages SET
-			status = $3,
+			status = $3::varchar,
 			delivered_at = COALESCE(delivered_at, $4),
-			read_at = CASE WHEN $3 = 'read' THEN COALESCE(read_at, $4) ELSE read_at END,
+			read_at = CASE WHEN $3::text = 'read' THEN COALESCE(read_at, $4) ELSE read_at END,
 			updated_at = now()
 		WHERE session_id = $1 AND provider_message_id = ANY($2)
 		  AND `+statusRankSQL+` BETWEEN 1 AND $5 - 1
@@ -283,7 +296,9 @@ func (r *pgRepository) ApplyReceipt(ctx context.Context, sessionID uuid.UUID, pr
 func (r *pgRepository) ListFiltered(ctx context.Context, f Filter) ([]Message, error) {
 	rows, err := r.pool.Query(ctx, selectMessage+` WHERE ($1::uuid IS NULL OR tenant_id = $1)
 		AND ($2::uuid IS NULL OR session_id = $2) AND ($3 = '' OR status = $3)
-		ORDER BY created_at DESC LIMIT $4 OFFSET $5`, f.TenantID, f.SessionID, string(f.Status), f.Limit, f.Offset)
+		AND ($4 = '' OR priority = $4) AND ($5 = '' OR position($5 in recipient) > 0)
+		ORDER BY created_at DESC LIMIT $6 OFFSET $7`,
+		f.TenantID, f.SessionID, string(f.Status), string(f.Priority), f.Recipient, f.Limit, f.Offset)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
@@ -333,4 +348,28 @@ func (r *pgRepository) QueueDepth(ctx context.Context, tenantID *uuid.UUID) (int
 		return 0, fmt.Errorf("count queue depth: %w", err)
 	}
 	return depth, nil
+}
+
+func (r *pgRepository) HourlyActivity(ctx context.Context, tenantID *uuid.UUID, since time.Time) ([]HourlyCount, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT date_trunc('hour', created_at) AS hour,
+		       count(*) FILTER (WHERE status IN ('sent', 'delivered', 'read')),
+		       count(*) FILTER (WHERE status = 'failed')
+		FROM messages
+		WHERE created_at >= $2 AND ($1::uuid IS NULL OR tenant_id = $1)
+		GROUP BY 1 ORDER BY 1`, tenantID, since)
+	if err != nil {
+		return nil, fmt.Errorf("hourly activity: %w", err)
+	}
+	defer rows.Close()
+
+	var counts []HourlyCount
+	for rows.Next() {
+		var c HourlyCount
+		if err := rows.Scan(&c.Hour, &c.Sent, &c.Failed); err != nil {
+			return nil, fmt.Errorf("scan hourly activity: %w", err)
+		}
+		counts = append(counts, c)
+	}
+	return counts, rows.Err()
 }

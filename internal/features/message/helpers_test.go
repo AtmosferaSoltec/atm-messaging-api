@@ -157,6 +157,9 @@ func (f *fakeRepository) CountByStatusSince(context.Context, *uuid.UUID, time.Ti
 	return nil, nil
 }
 func (f *fakeRepository) QueueDepth(context.Context, *uuid.UUID) (int, error) { return 0, nil }
+func (f *fakeRepository) HourlyActivity(context.Context, *uuid.UUID, time.Time) ([]HourlyCount, error) {
+	return nil, nil
+}
 
 func (f *fakeRepository) RecoverSending(context.Context) (int, error) { return 0, nil }
 func (f *fakeRepository) SessionsWithQueued(context.Context) ([]uuid.UUID, error) {

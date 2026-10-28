@@ -162,3 +162,8 @@ func (s *Service) CountByStatusSince(ctx context.Context, tenantID *uuid.UUID, s
 func (s *Service) QueueDepth(ctx context.Context, tenantID *uuid.UUID) (int, error) {
 	return s.repo.QueueDepth(ctx, tenantID)
 }
+
+// HourlyActivity groups the messages created since a time by hour.
+func (s *Service) HourlyActivity(ctx context.Context, tenantID *uuid.UUID, since time.Time) ([]HourlyCount, error) {
+	return s.repo.HourlyActivity(ctx, tenantID, since)
+}

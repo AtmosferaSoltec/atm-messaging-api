@@ -62,7 +62,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 - `go run ./cmd/api tenant create -name NAME` create a tenant; prints the API key and webhook secret once
 - `go run ./cmd/api serve` start the server (default command)
 - `ATM_API_KEY=... go run ./cmd/devqr -session <id>` draw the QR of a pending session
-- `go test -race ./...`
+- `go test -race ./...` (los tests con base real se saltan si falta `TEST_DATABASE_URL`; para correrlos: `TEST_DATABASE_URL='postgresql://messaging_app:<clave>@localhost:5432/messaging_test?search_path=messaging' go test ./...`)
 
 ## Endpoints v1 (MVP)
 
@@ -77,7 +77,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 - `GET    /v1/messages/{id}` message status
 - `POST|GET /v1/sessions/{id}/opt-outs`, `DELETE /v1/sessions/{id}/opt-outs/{to}` manage the promotional unsubscribe list (promotional messages to them get 422)
 - Tenant webhook settings: `GET|PUT|DELETE /v1/webhook`, `POST /v1/webhook/test`, `GET /v1/webhook/events`
-- Admin API (`/admin/v1`, `Authorization: Bearer adm_...` from `POST /auth/login {username, password}`): `POST /auth/logout`, `GET /auth/me`; `GET|POST /tenants`, `GET|PATCH /tenants/{id}`, `POST /tenants/{id}/rotate-key`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `GET /messages` (never returns bodies); `GET /metrics[?tenant_id=]`. Login is throttled (5 failures / 15 min per IP and per user).
+- Admin API (`/admin/v1`, `Authorization: Bearer adm_...` from `POST /auth/login {username, password}`): `POST /auth/logout`, `GET /auth/me`; `GET|POST /tenants`, `GET|PATCH /tenants/{id}`, `POST /tenants/{id}/rotate-key`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `GET /messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=` (never returns bodies; returns `has_more`); `GET /metrics[?tenant_id=]`; `GET /metrics/activity` (last 24 hours, hour by hour); `GET|PUT|DELETE /tenants/{id}/webhook` and `POST /tenants/{id}/webhook/test`. `GET /tenants` includes `sessions_count` and `messages_last_24h`; sessions include `phone`. Login is throttled (5 failures / 15 min per IP and per user).
 - Public connect page API (no auth; the token in the URL is the credential): `GET /public/connect/{token}` (label, channel, status, expiry; no internal ids) and `GET /public/connect/{token}/qr/stream` (SSE: `qr`, `connected`, `closed`). Links are 256-bit random, stored hashed, expire (`CONNECT_LINK_TTL`, default 24h), belong to one session and can do nothing else. Opening the stream of an unlinked session starts a new pairing.
 - Webhooks: `session.connected`, `session.disconnected`, `message.sent`, `message.delivered`, `message.read`, `message.failed`
 

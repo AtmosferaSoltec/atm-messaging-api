@@ -89,7 +89,10 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 	engine := server.Engine()
-	engine.GET("/health", func(c *gin.Context) {
+	cors := httpserver.CORS(cfg.Web.CORSOrigins)
+
+	// Health carries CORS headers too, so the web panel can show the service status.
+	engine.GET("/health", cors, func(c *gin.Context) {
 		if err := pool.Ping(c.Request.Context()); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "database_unavailable"})
 			return
@@ -102,8 +105,6 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	message.RegisterRoutes(v1, message.NewHandler(messages))
 	optout.RegisterRoutes(v1, optout.NewHandler(optOuts))
 	webhook.RegisterRoutes(v1, webhook.NewHandler(webhooks))
-
-	cors := httpserver.CORS(cfg.Web.CORSOrigins)
 
 	// Public links let a customer scan a QR code; the token in the URL is the credential.
 	connectLinks := connect.NewService(connect.NewRepository(pool), sessions, cfg.Web.ConnectLinkTTL)

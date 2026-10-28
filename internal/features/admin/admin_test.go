@@ -229,23 +229,44 @@ func (f *fakeLinks) Create(_ context.Context, _ uuid.UUID, label string) (connec
 	return connect.Created{Token: "cl_secret-token", Label: label, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-type fakeMessages struct{}
+type fakeMessages struct {
+	messages   []message.Message
+	lastFilter message.Filter
+	activity   []message.HourlyCount
+}
 
-func (fakeMessages) ListAll(context.Context, message.Filter) ([]message.Message, error) {
+func (f *fakeMessages) ListAll(_ context.Context, filter message.Filter) ([]message.Message, error) {
+	f.lastFilter = filter
+	if f.messages != nil {
+		return f.messages, nil
+	}
 	return []message.Message{{ID: uuid.New(), Recipient: "51900000001", Body: "SENSITIVE CONTENT", Status: message.StatusSent}}, nil
 }
-func (fakeMessages) CountByStatusSince(context.Context, *uuid.UUID, time.Time) (map[message.Status]int, error) {
+func (*fakeMessages) CountByStatusSince(context.Context, *uuid.UUID, time.Time) (map[message.Status]int, error) {
 	return map[message.Status]int{message.StatusSent: 5}, nil
 }
-func (fakeMessages) QueueDepth(context.Context, *uuid.UUID) (int, error) { return 2, nil }
+func (*fakeMessages) QueueDepth(context.Context, *uuid.UUID) (int, error) { return 2, nil }
+func (f *fakeMessages) HourlyActivity(context.Context, *uuid.UUID, time.Time) ([]message.HourlyCount, error) {
+	return f.activity, nil
+}
 
-type fakeWebhooks struct{}
+type fakeWebhooks struct {
+	url      string
+	notified []string
+}
 
-func (fakeWebhooks) SetURL(context.Context, uuid.UUID, string) error { return nil }
-func (fakeWebhooks) Recent(context.Context, uuid.UUID, int) ([]webhook.Event, error) {
+func (*fakeWebhooks) SetURL(context.Context, uuid.UUID, string) error { return nil }
+func (f *fakeWebhooks) Config(context.Context, uuid.UUID) (string, string, error) {
+	return f.url, "whsec_test", nil
+}
+func (f *fakeWebhooks) Notify(_ context.Context, _ uuid.UUID, eventType string, _ any) error {
+	f.notified = append(f.notified, eventType)
+	return nil
+}
+func (*fakeWebhooks) Recent(context.Context, uuid.UUID, int) ([]webhook.Event, error) {
 	return nil, nil
 }
-func (fakeWebhooks) CountByStatus(context.Context, *uuid.UUID) (map[webhook.Status]int, error) {
+func (*fakeWebhooks) CountByStatus(context.Context, *uuid.UUID) (map[webhook.Status]int, error) {
 	return nil, nil
 }
 
@@ -255,6 +276,8 @@ type api struct {
 	tenants  *fakeTenants
 	sessions *fakeSessions
 	links    *fakeLinks
+	messages *fakeMessages
+	webhooks *fakeWebhooks
 }
 
 func newAPI(t *testing.T) *api {
@@ -265,10 +288,12 @@ func newAPI(t *testing.T) *api {
 	tenants := &fakeTenants{tenants: map[uuid.UUID]tenant.Tenant{}}
 	sessions := &fakeSessions{}
 	links := &fakeLinks{}
-	handler := NewHandler(auth, tenants, sessions, fakeMessages{}, fakeWebhooks{}, links, "https://panel.example.com/")
+	messages := &fakeMessages{}
+	webhooks := &fakeWebhooks{}
+	handler := NewHandler(auth, tenants, sessions, messages, webhooks, links, "https://panel.example.com/")
 	router := gin.New()
 	RegisterRoutes(router.Group("/admin/v1"), handler, auth)
-	return &api{router: router, password: testPassword, tenants: tenants, sessions: sessions, links: links}
+	return &api{router: router, password: testPassword, tenants: tenants, sessions: sessions, links: links, messages: messages, webhooks: webhooks}
 }
 
 func (a *api) do(method, path, token string, body any) *httptest.ResponseRecorder {
@@ -313,7 +338,8 @@ func TestEveryAdminRouteExceptLoginRequiresAToken(t *testing.T) {
 		{"PUT", "/admin/v1/tenants/" + id + "/webhook"}, {"DELETE", "/admin/v1/tenants/" + id + "/webhook"},
 		{"GET", "/admin/v1/tenants/" + id + "/webhook/events"},
 		{"GET", "/admin/v1/sessions"}, {"GET", "/admin/v1/sessions/" + id}, {"DELETE", "/admin/v1/sessions/" + id},
-		{"GET", "/admin/v1/messages"}, {"GET", "/admin/v1/metrics"},
+		{"GET", "/admin/v1/messages"}, {"GET", "/admin/v1/metrics"}, {"GET", "/admin/v1/metrics/activity"},
+		{"GET", "/admin/v1/tenants/" + id + "/webhook"}, {"POST", "/admin/v1/tenants/" + id + "/webhook/test"},
 	}
 	for _, r := range routes {
 		if rec := a.do(r.method, r.path, "", nil); rec.Code != http.StatusUnauthorized {
@@ -529,5 +555,131 @@ func TestDisconnectKeepsTheSession(t *testing.T) {
 	}
 	if len(a.sessions.disconnected) != 1 || a.sessions.disconnected[0] != id {
 		t.Errorf("the session should have been disconnected, got %v", a.sessions.disconnected)
+	}
+}
+
+func TestTenantListIncludesActivityCounters(t *testing.T) {
+	a := newAPI(t)
+	token := a.login(t)
+	_, _ = a.tenants.Create(context.Background(), "La Vendimia")
+
+	rec := a.do(http.MethodGet, "/admin/v1/tenants", token, nil)
+	var body struct {
+		Items []struct {
+			Name            string `json:"name"`
+			SessionsCount   int    `json:"sessions_count"`
+			MessagesLast24h int    `json:"messages_last_24h"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Items) != 1 {
+		t.Fatalf("unexpected body %s (%v)", rec.Body, err)
+	}
+	if body.Items[0].SessionsCount != 3 || body.Items[0].MessagesLast24h != 5 {
+		t.Errorf("counters should be summed from the status counts, got %+v", body.Items[0])
+	}
+}
+
+func TestPhoneFromChannelRef(t *testing.T) {
+	cases := map[string]string{
+		"51936416623:12@s.whatsapp.net": "51936416623",
+		"51936416623@s.whatsapp.net":    "51936416623",
+		"51936416623":                   "51936416623",
+		"":                              "",
+		"abc@s.whatsapp.net":            "",
+		"@s.whatsapp.net":               "",
+	}
+	for ref, want := range cases {
+		if got := phoneFromChannelRef(ref); got != want {
+			t.Errorf("%q: got %q, want %q", ref, got, want)
+		}
+	}
+}
+
+func TestMessageListingPaginatesAndFilters(t *testing.T) {
+	a := newAPI(t)
+	token := a.login(t)
+	for i := 0; i < 6; i++ { // one more than the page size of 5 requested below
+		a.messages.messages = append(a.messages.messages, message.Message{ID: uuid.New(), Status: message.StatusSent})
+	}
+
+	rec := a.do(http.MethodGet, "/admin/v1/messages?limit=5&offset=10&status=failed&priority=promotional&q=%2B51%20936-416", token, nil)
+	var body struct {
+		Items   []map[string]any `json:"items"`
+		HasMore bool             `json:"has_more"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if len(body.Items) != 5 || !body.HasMore {
+		t.Errorf("a sixth row means another page exists: %d items, has_more=%v", len(body.Items), body.HasMore)
+	}
+
+	f := a.messages.lastFilter
+	if f.Limit != 6 || f.Offset != 10 || f.Status != message.StatusFailed || f.Priority != message.PriorityPromotional || f.Recipient != "51936416" {
+		t.Errorf("filters must reach the service (limit+1 for the lookahead, digits-only search): %+v", f)
+	}
+
+	a.messages.messages = a.messages.messages[:2]
+	rec = a.do(http.MethodGet, "/admin/v1/messages?limit=5", token, nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if len(body.Items) != 2 || body.HasMore {
+		t.Errorf("the last page has no more: %d items, has_more=%v", len(body.Items), body.HasMore)
+	}
+}
+
+func TestActivityAlwaysCoversTheLast24Hours(t *testing.T) {
+	a := newAPI(t)
+	token := a.login(t)
+	now := time.Now().UTC().Truncate(time.Hour)
+	a.messages.activity = []message.HourlyCount{
+		{Hour: now, Sent: 7, Failed: 1},
+		{Hour: now.Add(-5 * time.Hour), Sent: 3},
+		{Hour: now.Add(-48 * time.Hour), Sent: 99}, // outside the window: ignored
+	}
+
+	rec := a.do(http.MethodGet, "/admin/v1/metrics/activity", token, nil)
+	var body struct {
+		Items []ActivityPoint `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 24 {
+		t.Fatalf("expected 24 hourly points, got %d", len(body.Items))
+	}
+	last := body.Items[23]
+	if !last.Hour.Equal(now) || last.Sent != 7 || last.Failed != 1 {
+		t.Errorf("the last point is the current hour: %+v", last)
+	}
+	if body.Items[18].Sent != 3 || body.Items[0].Sent != 0 {
+		t.Errorf("hours must line up and empty hours be zero: %+v / %+v", body.Items[18], body.Items[0])
+	}
+}
+
+func TestTenantWebhookConfigAndTest(t *testing.T) {
+	a := newAPI(t)
+	token := a.login(t)
+	id := uuid.NewString()
+
+	rec := a.do(http.MethodGet, "/admin/v1/tenants/"+id+"/webhook", token, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "whsec_test") {
+		t.Errorf("the operator can read the webhook config: %d %s", rec.Code, rec.Body)
+	}
+
+	if rec := a.do(http.MethodPost, "/admin/v1/tenants/"+id+"/webhook/test", token, nil); rec.Code != http.StatusConflict {
+		t.Errorf("a test without a configured url is a conflict, got %d", rec.Code)
+	}
+
+	a.webhooks.url = "https://example.com/hook"
+	if rec := a.do(http.MethodPost, "/admin/v1/tenants/"+id+"/webhook/test", token, nil); rec.Code != http.StatusAccepted {
+		t.Errorf("expected 202, got %d", rec.Code)
+	}
+	if len(a.webhooks.notified) != 1 || a.webhooks.notified[0] != webhook.TestEventType {
+		t.Errorf("a webhook.test event must be queued, got %v", a.webhooks.notified)
+	}
+}
+
+func TestSessionResponseIncludesThePhone(t *testing.T) {
+	s := session.Session{ID: uuid.New(), TenantID: uuid.New(), AccountRef: "e1", ChannelRef: "51936416623:7@s.whatsapp.net"}
+	if got := newSessionResponse(s).Phone; got != "51936416623" {
+		t.Errorf("got %q", got)
 	}
 }

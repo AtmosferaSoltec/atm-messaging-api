@@ -26,7 +26,9 @@ func RegisterRoutes(group *gin.RouterGroup, handler *Handler, auth *AuthService)
 	protected.GET("/tenants/:id", handler.GetTenant)
 	protected.PATCH("/tenants/:id", handler.UpdateTenant)
 	protected.POST("/tenants/:id/rotate-key", handler.RotateKey)
+	protected.GET("/tenants/:id/webhook", handler.GetTenantWebhook)
 	protected.PUT("/tenants/:id/webhook", handler.SetTenantWebhook)
+	protected.POST("/tenants/:id/webhook/test", handler.TestTenantWebhook)
 	protected.DELETE("/tenants/:id/webhook", handler.DeleteTenantWebhook)
 	protected.GET("/tenants/:id/webhook/events", handler.TenantWebhookEvents)
 
@@ -39,4 +41,5 @@ func RegisterRoutes(group *gin.RouterGroup, handler *Handler, auth *AuthService)
 
 	protected.GET("/messages", handler.ListMessages)
 	protected.GET("/metrics", handler.Metrics)
+	protected.GET("/metrics/activity", handler.Activity)
 }
