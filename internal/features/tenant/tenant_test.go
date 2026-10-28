@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -141,7 +142,7 @@ func TestServiceCreateStoresOnlyTheHash(t *testing.T) {
 func TestServiceCreateRejectsInvalidName(t *testing.T) {
 	service := NewService(newFakeRepository())
 	for _, name := range []string{"", "   ", strings.Repeat("x", 101)} {
-		if _, err := service.Create(context.Background(), name); err != ErrInvalidName {
+		if _, err := service.Create(context.Background(), name); !errors.Is(err, ErrInvalidName) {
 			t.Errorf("name %q: expected ErrInvalidName, got %v", name, err)
 		}
 	}
@@ -158,7 +159,7 @@ func TestServiceAuthenticate(t *testing.T) {
 	}
 
 	for _, key := range []string{"", "atm_unknown"} {
-		if _, err := service.Authenticate(context.Background(), key); err != ErrInvalidAPIKey {
+		if _, err := service.Authenticate(context.Background(), key); !errors.Is(err, ErrInvalidAPIKey) {
 			t.Errorf("key %q: expected ErrInvalidAPIKey, got %v", key, err)
 		}
 	}
@@ -166,7 +167,7 @@ func TestServiceAuthenticate(t *testing.T) {
 	inactive := repo.byHash[HashAPIKey(created.APIKey)]
 	inactive.IsActive = false
 	repo.byHash[HashAPIKey(created.APIKey)] = inactive
-	if _, err := service.Authenticate(context.Background(), created.APIKey); err != ErrInvalidAPIKey {
+	if _, err := service.Authenticate(context.Background(), created.APIKey); !errors.Is(err, ErrInvalidAPIKey) {
 		t.Errorf("inactive tenant must not authenticate, got %v", err)
 	}
 }
@@ -221,7 +222,7 @@ func TestRotateAPIKeyInvalidatesTheOldKey(t *testing.T) {
 	if rotated.APIKey == created.APIKey {
 		t.Fatal("rotation must issue a different key")
 	}
-	if _, err := service.Authenticate(context.Background(), created.APIKey); err != ErrInvalidAPIKey {
+	if _, err := service.Authenticate(context.Background(), created.APIKey); !errors.Is(err, ErrInvalidAPIKey) {
 		t.Errorf("the old key must stop working, got %v", err)
 	}
 	if got, err := service.Authenticate(context.Background(), rotated.APIKey); err != nil || got.ID != created.Tenant.ID {
@@ -238,12 +239,12 @@ func TestUpdateTenant(t *testing.T) {
 	if err != nil || updated.IsActive {
 		t.Fatalf("expected the tenant to be deactivated, got %v / %v", updated, err)
 	}
-	if _, err := service.Authenticate(context.Background(), created.APIKey); err != ErrInvalidAPIKey {
+	if _, err := service.Authenticate(context.Background(), created.APIKey); !errors.Is(err, ErrInvalidAPIKey) {
 		t.Errorf("a deactivated tenant's key must stop working, got %v", err)
 	}
 
 	blank := "   "
-	if _, err := service.Update(context.Background(), created.Tenant.ID, &blank, nil); err != ErrInvalidName {
+	if _, err := service.Update(context.Background(), created.Tenant.ID, &blank, nil); !errors.Is(err, ErrInvalidName) {
 		t.Errorf("expected ErrInvalidName, got %v", err)
 	}
 }
@@ -257,7 +258,7 @@ func TestTenantNamesAreUniqueIgnoringCaseAndSpaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"La Vendimia", "la vendimia", "  LA VENDIMIA  "} {
-		if _, err := service.Create(ctx, name); err != ErrNameTaken {
+		if _, err := service.Create(ctx, name); !errors.Is(err, ErrNameTaken) {
 			t.Errorf("%q: expected ErrNameTaken, got %v", name, err)
 		}
 	}
@@ -267,7 +268,7 @@ func TestTenantNamesAreUniqueIgnoringCaseAndSpaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	taken := "la vendimia"
-	if _, err := service.Update(ctx, other.Tenant.ID, &taken, nil); err != ErrNameTaken {
+	if _, err := service.Update(ctx, other.Tenant.ID, &taken, nil); !errors.Is(err, ErrNameTaken) {
 		t.Errorf("renaming onto an existing name must fail, got %v", err)
 	}
 	same := "LA VENDIMIA"

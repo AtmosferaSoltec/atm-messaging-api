@@ -103,7 +103,7 @@ type UserResponse struct {
 }
 
 func newUserResponse(u User) UserResponse {
-	return UserResponse{Username: u.Username}
+	return UserResponse(u)
 }
 
 // Login handles POST /admin/v1/auth/login.

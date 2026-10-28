@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,10 +105,10 @@ func TestCreateStoresOnlyTheHashAndDefaultsTheLabel(t *testing.T) {
 
 func TestCreateRejectsUnknownSessionsAndLongLabels(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.service.Create(context.Background(), uuid.New(), ""); err != session.ErrNotFound {
+	if _, err := f.service.Create(context.Background(), uuid.New(), ""); !errors.Is(err, session.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
-	if _, err := f.service.Create(context.Background(), f.session.ID, strings.Repeat("x", 101)); err != ErrInvalidLabel {
+	if _, err := f.service.Create(context.Background(), f.session.ID, strings.Repeat("x", 101)); !errors.Is(err, ErrInvalidLabel) {
 		t.Errorf("expected ErrInvalidLabel, got %v", err)
 	}
 }
@@ -117,7 +118,7 @@ func TestANewLinkReplacesThePreviousOne(t *testing.T) {
 	first, _ := f.service.Create(context.Background(), f.session.ID, "")
 	second, _ := f.service.Create(context.Background(), f.session.ID, "")
 
-	if _, _, err := f.service.Resolve(context.Background(), first.Token); err != ErrInvalidLink {
+	if _, _, err := f.service.Resolve(context.Background(), first.Token); !errors.Is(err, ErrInvalidLink) {
 		t.Errorf("the replaced link must stop working, got %v", err)
 	}
 	if _, _, err := f.service.Resolve(context.Background(), second.Token); err != nil {
@@ -134,7 +135,7 @@ func TestLinksExpire(t *testing.T) {
 		t.Errorf("a link is valid until it expires: %v", err)
 	}
 	f.now = f.now.Add(2 * time.Hour)
-	if _, _, err := f.service.Resolve(context.Background(), created.Token); err != ErrInvalidLink {
+	if _, _, err := f.service.Resolve(context.Background(), created.Token); !errors.Is(err, ErrInvalidLink) {
 		t.Errorf("an expired link must be rejected, got %v", err)
 	}
 }
@@ -144,16 +145,16 @@ func TestInvalidTokensAllLookTheSame(t *testing.T) {
 	created, _ := f.service.Create(context.Background(), f.session.ID, "")
 
 	for _, token := range []string{"", "nope", "cl_unknown", "atm_" + created.Token[3:], created.Token + "x"} {
-		if _, _, err := f.service.Resolve(context.Background(), token); err != ErrInvalidLink {
+		if _, _, err := f.service.Resolve(context.Background(), token); !errors.Is(err, ErrInvalidLink) {
 			t.Errorf("%q: expected ErrInvalidLink, got %v", token, err)
 		}
-		if _, _, _, err := f.service.Watch(context.Background(), token); err != ErrInvalidLink {
+		if _, _, _, err := f.service.Watch(context.Background(), token); !errors.Is(err, ErrInvalidLink) {
 			t.Errorf("%q: Watch expected ErrInvalidLink, got %v", token, err)
 		}
 	}
 
 	delete(f.sessions.sessions, f.session.ID)
-	if _, _, err := f.service.Resolve(context.Background(), created.Token); err != ErrInvalidLink {
+	if _, _, err := f.service.Resolve(context.Background(), created.Token); !errors.Is(err, ErrInvalidLink) {
 		t.Errorf("the link of a deleted session must look invalid, got %v", err)
 	}
 }

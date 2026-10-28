@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 )
@@ -31,7 +32,7 @@ func TestOnlyOneInstanceHoldsTheLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(other.Close)
-	if _, err := AcquireInstanceLock(ctx, other); err != ErrAnotherInstance {
+	if _, err := AcquireInstanceLock(ctx, other); !errors.Is(err, ErrAnotherInstance) {
 		t.Fatalf("a second instance must be refused, got %v", err)
 	}
 

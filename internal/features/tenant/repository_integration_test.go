@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -38,7 +39,7 @@ func TestTenantNamesAreUniqueInPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"itest-unique Name", "ITEST-UNIQUE name", "  itest-unique name "} {
-		if _, err := service.Create(ctx, name); err != ErrNameTaken {
+		if _, err := service.Create(ctx, name); !errors.Is(err, ErrNameTaken) {
 			t.Errorf("%q: the database must reject a duplicate, got %v", name, err)
 		}
 	}
@@ -48,7 +49,7 @@ func TestTenantNamesAreUniqueInPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	taken := "ITEST-UNIQUE NAME"
-	if _, err := service.Update(ctx, other.Tenant.ID, &taken, nil); err != ErrNameTaken {
+	if _, err := service.Update(ctx, other.Tenant.ID, &taken, nil); !errors.Is(err, ErrNameTaken) {
 		t.Errorf("renaming onto an existing name must fail, got %v", err)
 	}
 	if _, err := service.Update(ctx, first.Tenant.ID, &taken, nil); err != nil {

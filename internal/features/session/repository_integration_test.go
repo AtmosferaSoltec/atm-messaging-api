@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -66,7 +67,7 @@ func TestSessionRepositoryAgainstPostgres(t *testing.T) {
 	}
 	dup := sess
 	dup.ID = uuid.New()
-	if err := repo.Insert(ctx, dup); err != ErrAlreadyExists {
+	if err := repo.Insert(ctx, dup); !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("one session per account and channel is enforced by the database, got %v", err)
 	}
 

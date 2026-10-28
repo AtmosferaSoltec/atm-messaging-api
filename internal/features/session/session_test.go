@@ -362,7 +362,7 @@ func TestDisconnectKeepsTheSessionAndClearsItsCredentials(t *testing.T) {
 	if got := notifier.types(); len(got) != 2 || got[1] != "session.disconnected:logged_out" {
 		t.Errorf("the tenant must be told, got %v", got)
 	}
-	if err := service.Disconnect(context.Background(), uuid.New()); err != ErrNotFound {
+	if err := service.Disconnect(context.Background(), uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Errorf("an unknown session is ErrNotFound, got %v", err)
 	}
 }

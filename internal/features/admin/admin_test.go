@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,7 +77,7 @@ func TestLoginAndAuthenticate(t *testing.T) {
 	if err := auth.Logout(context.Background(), result.Token); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.Authenticate(context.Background(), result.Token); err != ErrInvalidToken {
+	if _, err := auth.Authenticate(context.Background(), result.Token); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("a logged-out token must stop working, got %v", err)
 	}
 }
@@ -91,7 +92,7 @@ func TestLoginFailuresAreIndistinguishable(t *testing.T) {
 		"oversized":      {strings.Repeat("a", 1000), testPassword},
 	}
 	for name, c := range cases {
-		if _, err := auth.Login(context.Background(), c[0], c[1]); err != ErrInvalidCredentials {
+		if _, err := auth.Login(context.Background(), c[0], c[1]); !errors.Is(err, ErrInvalidCredentials) {
 			t.Errorf("%s: expected ErrInvalidCredentials, got %v", name, err)
 		}
 	}
@@ -101,12 +102,12 @@ func TestExpiredTokensAndTenantKeysAreRejected(t *testing.T) {
 	auth := newTestAuth(t)
 	result, _ := auth.Login(context.Background(), "joel", testPassword)
 
-	if _, err := auth.Authenticate(context.Background(), "atm_a-tenant-api-key"); err != ErrInvalidToken {
+	if _, err := auth.Authenticate(context.Background(), "atm_a-tenant-api-key"); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("a tenant API key is not an admin token, got %v", err)
 	}
 
 	auth.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	if _, err := auth.Authenticate(context.Background(), result.Token); err != ErrInvalidToken {
+	if _, err := auth.Authenticate(context.Background(), result.Token); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("an expired token must be rejected, got %v", err)
 	}
 	if _, err := auth.Login(context.Background(), "joel", testPassword); err != nil {
@@ -789,7 +790,7 @@ func TestOperatorCanFollowAMessage(t *testing.T) {
 func TestDuplicateTenantNameIsAConflict(t *testing.T) {
 	if got := translate(tenant.ErrNameTaken); got == nil {
 		t.Fatal("expected a translated error")
-	} else if apiErr, ok := got.(*apierror.Error); !ok || apiErr.Status != http.StatusConflict || apiErr.Code != "tenant_name_taken" {
+	} else if apiErr := new(apierror.Error); !errors.As(got, &apiErr) || apiErr.Status != http.StatusConflict || apiErr.Code != "tenant_name_taken" {
 		t.Errorf("unexpected translation %v", got)
 	}
 }

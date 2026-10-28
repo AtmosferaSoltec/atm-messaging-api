@@ -72,7 +72,7 @@ func (s *Service) Notify(ctx context.Context, tenantID uuid.UUID, eventType stri
 func (s *Service) SetURL(ctx context.Context, tenantID uuid.UUID, url string) error {
 	if url != "" {
 		if err := ValidateURL(url, s.allowInsecure); err != nil {
-			return fmt.Errorf("%w: %s", ErrInvalidURL, err)
+			return fmt.Errorf("%w: %w", ErrInvalidURL, err)
 		}
 	}
 	return s.settings.SetWebhookURL(ctx, tenantID, url)

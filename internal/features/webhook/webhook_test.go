@@ -75,12 +75,16 @@ func TestHTTPClientBlocksInternalAddresses(t *testing.T) {
 	defer server.Close() // listens on 127.0.0.1
 
 	blocked := NewHTTPClient(2*time.Second, false)
-	if _, err := blocked.Get(server.URL); !errors.Is(err, ErrBlockedAddress) {
+	resp, err := blocked.Get(server.URL)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, ErrBlockedAddress) {
 		t.Fatalf("a loopback target must be blocked, got %v", err)
 	}
 
 	allowed := NewHTTPClient(2*time.Second, true)
-	resp, err := allowed.Get(server.URL)
+	resp, err = allowed.Get(server.URL)
 	if err != nil {
 		t.Fatalf("with private addresses allowed the request should work: %v", err)
 	}

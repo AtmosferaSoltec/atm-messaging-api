@@ -2,6 +2,7 @@ package message
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestMessageRepositoryAgainstPostgres(t *testing.T) {
 	if got, err := repo.FindByID(ctx, tenantID, first.ID); err != nil || got.ID != first.ID {
 		t.Fatalf("find: %+v %v", got, err)
 	}
-	if _, err := repo.FindByID(ctx, uuid.New(), first.ID); err != ErrNotFound {
+	if _, err := repo.FindByID(ctx, uuid.New(), first.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("another tenant must not see the message, got %v", err)
 	}
 
@@ -123,7 +124,7 @@ func TestMessageRepositoryAgainstPostgres(t *testing.T) {
 	if err != nil || string(attachment) != "%PDF-bytes" {
 		t.Fatalf("mark sending must return the stored attachment: %q %v", attachment, err)
 	}
-	if _, err := repo.MarkSending(ctx, first.ID); err != ErrNotFound {
+	if _, err := repo.MarkSending(ctx, first.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a message can be claimed once, got %v", err)
 	}
 	if err := repo.Requeue(ctx, first.ID, time.Now().Add(time.Hour), 1); err != nil {

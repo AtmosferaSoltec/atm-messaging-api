@@ -53,7 +53,7 @@ func NewHTTPClient(timeout time.Duration, allowPrivate bool) *http.Client {
 		dialer.Control = func(_, address string, _ syscall.RawConn) error {
 			host, _, err := net.SplitHostPort(address)
 			if err != nil {
-				return fmt.Errorf("%w: %v", ErrBlockedAddress, err)
+				return fmt.Errorf("%w: %w", ErrBlockedAddress, err)
 			}
 			if isBlocked(net.ParseIP(host)) {
 				return ErrBlockedAddress

@@ -1,0 +1,15 @@
+# golangci-lint v2. The deploy workflow runs it with this same configuration:
+# an error here stops the deploy.
+version: "2"
+
+linters:
+  # The usual ones (errcheck, govet, ineffassign, staticcheck, unused) and these:
+  enable:
+    - bodyclose
+    - errorlint
+    - rowserrcheck
+    - sqlclosecheck
+
+formatters:
+  enable:
+    - gofmt
