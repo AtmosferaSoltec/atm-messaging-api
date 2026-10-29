@@ -1,9 +1,51 @@
+# Secrets / environment
 .env
+.env.*
+!.env.example
+!*.env.example
+!.env.*.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+
+# Build output
 /bin/
+/dist/
+/build/
+
+# Go test / coverage / profiling
 *.test
 *.out
-.DS_Store
-data/
+*.prof
+coverage.txt
+coverage.html
+
+# Local data / databases
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+
+# Temp / logs
+/tmp/
+*.log
+logs/
+
+# Go workspace
+go.work
+go.work.sum
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Messaging local data
+data/
