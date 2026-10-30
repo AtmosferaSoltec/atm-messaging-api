@@ -39,17 +39,6 @@ type Auth struct {
 // Enabled reports whether both values are set.
 func (a Auth) Enabled() bool { return a.PublicKeyBase64 != "" && a.Issuer != "" }
 
-// Admin configures the single operator of the panel. The admin API is only
-// served when both User and Password are set.
-type Admin struct {
-	User       string
-	Password   string
-	SessionTTL time.Duration
-}
-
-// Enabled reports whether the admin API has credentials to run with.
-func (a Admin) Enabled() bool { return a.User != "" && a.Password != "" }
-
 // Web describes the web app that talks to the API.
 type Web struct {
 	// URL is the web app's public base URL; connect links are built on it.
@@ -68,7 +57,6 @@ type Config struct {
 	Limits      limits.Policy
 	Queue       Queue
 	Webhook     Webhook
-	Admin       Admin
 	Web         Web
 	// Auth is how the service validates the service tokens of ATM-Auth-API.
 	Auth Auth
@@ -105,10 +93,6 @@ func Load() (Config, error) {
 	}
 	cfg.Webhook = webhook
 
-	cfg.Admin = Admin{User: os.Getenv("ADMIN_USER"), Password: os.Getenv("ADMIN_PASSWORD"), SessionTTL: 12 * time.Hour}
-	if (cfg.Admin.User == "") != (cfg.Admin.Password == "") {
-		return Config{}, errors.New("ADMIN_USER and ADMIN_PASSWORD must be set together")
-	}
 	cfg.Auth = Auth{PublicKeyBase64: os.Getenv("AUTH_PUBLIC_KEY_BASE64"), Issuer: os.Getenv("AUTH_ISSUER")}
 	if !cfg.Auth.Enabled() {
 		return Config{}, errors.New("AUTH_PUBLIC_KEY_BASE64 and AUTH_ISSUER are required")
@@ -119,8 +103,7 @@ func Load() (Config, error) {
 		ConnectLinkTTL: 24 * time.Hour,
 	}
 	for name, dest := range map[string]*time.Duration{
-		"ADMIN_SESSION_TTL": &cfg.Admin.SessionTTL,
-		"CONNECT_LINK_TTL":  &cfg.Web.ConnectLinkTTL,
+		"CONNECT_LINK_TTL": &cfg.Web.ConnectLinkTTL,
 	} {
 		if err := envDuration(name, dest); err != nil {
 			return Config{}, err

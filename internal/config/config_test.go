@@ -88,11 +88,8 @@ func TestWebhookPrivateTargetsAreOnlyAllowedInDevelopmentByDefault(t *testing.T)
 	}
 }
 
-func TestAdminAndWebSettings(t *testing.T) {
+func TestWebSettings(t *testing.T) {
 	setRequired(t)
-	t.Setenv("ADMIN_USER", "joel")
-	t.Setenv("ADMIN_PASSWORD", "a-long-password-1")
-	t.Setenv("ADMIN_SESSION_TTL", "2h")
 	t.Setenv("WEB_CORS_ORIGINS", " https://panel.example.com , http://localhost:5173 ,")
 	t.Setenv("PUBLIC_WEB_URL", "https://panel.example.com")
 	t.Setenv("CONNECT_LINK_TTL", "6h")
@@ -101,9 +98,6 @@ func TestAdminAndWebSettings(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !cfg.Admin.Enabled() || cfg.Admin.User != "joel" || cfg.Admin.SessionTTL != 2*time.Hour {
-		t.Errorf("unexpected admin settings: %+v", cfg.Admin)
 	}
 	if len(cfg.Web.CORSOrigins) != 2 || cfg.Web.CORSOrigins[1] != "http://localhost:5173" ||
 		cfg.Web.URL != "https://panel.example.com" || cfg.Web.ConnectLinkTTL != 6*time.Hour {
@@ -114,27 +108,16 @@ func TestAdminAndWebSettings(t *testing.T) {
 	}
 }
 
-func TestAdminDefaultsAreSafe(t *testing.T) {
+func TestWebDefaultsAreSafe(t *testing.T) {
 	setRequired(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if cfg.Admin.Enabled() {
-		t.Error("the admin API stays off until credentials are configured")
 	}
 	if len(cfg.Web.CORSOrigins) != 0 || len(cfg.TrustedProxies) != 0 {
 		t.Error("by default no browser origin and no proxy header is trusted")
 	}
 	if cfg.Web.ConnectLinkTTL != 24*time.Hour {
 		t.Errorf("connect links last 24h by default, got %v", cfg.Web.ConnectLinkTTL)
-	}
-}
-
-func TestAdminCredentialsComeTogether(t *testing.T) {
-	setRequired(t)
-	t.Setenv("ADMIN_USER", "joel")
-	if _, err := Load(); err == nil {
-		t.Error("a user without a password must be rejected")
 	}
 }

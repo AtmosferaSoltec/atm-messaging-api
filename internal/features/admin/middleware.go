@@ -7,45 +7,30 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/apierror"
+	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/authtoken"
 )
 
-const userContextKey = "admin"
+const operatorContextKey = "admin"
 
-// RequireAdmin authenticates `Authorization: Bearer adm_...` with an admin
-// session token. Service tokens are not accepted here, and admin tokens are
-// not accepted on /v1.
-func RequireAdmin(auth *AuthService) gin.HandlerFunc {
+// RequireAdmin accepts only the access token of a superadmin of ATM-Auth-API.
+// Service tokens and the tokens of ordinary users are refused.
+func RequireAdmin(verifier *authtoken.Verifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := bearerToken(c)
-		if token == "" {
+		token, found := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if !found || strings.TrimSpace(token) == "" {
 			apierror.Write(c, apierror.Unauthorized("missing or malformed Authorization header"))
 			return
 		}
-		user, err := auth.Authenticate(c.Request.Context(), token)
-		if errors.Is(err, ErrInvalidToken) {
-			apierror.Write(c, apierror.Unauthorized("invalid or expired token"))
+		operator, err := verifier.Superadmin(strings.TrimSpace(token))
+		if errors.Is(err, authtoken.ErrNotSuperadmin) {
+			apierror.Write(c, apierror.New(403, "forbidden", "superadmin access is required"))
 			return
 		}
 		if err != nil {
-			apierror.Write(c, err)
+			apierror.Write(c, apierror.Unauthorized("invalid or expired token"))
 			return
 		}
-		c.Set(userContextKey, user)
+		c.Set(operatorContextKey, operator)
 		c.Next()
 	}
-}
-
-// FromContext returns the admin set by RequireAdmin.
-func FromContext(c *gin.Context) User {
-	value, _ := c.Get(userContextKey)
-	user, _ := value.(User)
-	return user
-}
-
-func bearerToken(c *gin.Context) string {
-	token, found := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
-	if !found {
-		return ""
-	}
-	return strings.TrimSpace(token)
 }

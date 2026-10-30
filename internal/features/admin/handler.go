@@ -68,8 +68,6 @@ type ConnectLinkService interface {
 
 // Handler serves the administration endpoints.
 type Handler struct {
-	auth     *AuthService
-	limiter  *loginLimiter
 	tenants  TenantService
 	sessions SessionService
 	messages MessageService
@@ -81,73 +79,11 @@ type Handler struct {
 }
 
 // NewHandler creates a Handler. publicWebURL is the web app's base URL.
-func NewHandler(auth *AuthService, tenants TenantService, sessions SessionService, messages MessageService, webhooks WebhookService, links ConnectLinkService, publicWebURL string) *Handler {
+func NewHandler(tenants TenantService, sessions SessionService, messages MessageService, webhooks WebhookService, links ConnectLinkService, publicWebURL string) *Handler {
 	return &Handler{
-		auth: auth, limiter: newLoginLimiter(), tenants: tenants, sessions: sessions, messages: messages,
+		tenants: tenants, sessions: sessions, messages: messages,
 		webhooks: webhooks, links: links, publicWebURL: strings.TrimRight(publicWebURL, "/"),
 	}
-}
-
-// ---- authentication -------------------------------------------------------
-
-// LoginRequest is the body of POST /admin/v1/auth/login.
-type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
-}
-
-// UserResponse is the public representation of the operator.
-type UserResponse struct {
-	Username string `json:"username"`
-}
-
-func newUserResponse(u User) UserResponse {
-	return UserResponse(u)
-}
-
-// Login handles POST /admin/v1/auth/login.
-func (h *Handler) Login(c *gin.Context) {
-	var req LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		apierror.Write(c, apierror.BadRequest("invalid_request", "username and password are required"))
-		return
-	}
-
-	ipKey := "ip:" + c.ClientIP()
-	userKey := "user:" + strings.ToLower(strings.TrimSpace(req.Username))
-	if h.limiter.Blocked(ipKey) || h.limiter.Blocked(userKey) {
-		apierror.Write(c, apierror.New(http.StatusTooManyRequests, "too_many_attempts", "too many failed attempts; try again later"))
-		return
-	}
-
-	result, err := h.auth.Login(c.Request.Context(), req.Username, req.Password)
-	if errors.Is(err, ErrInvalidCredentials) {
-		h.limiter.Fail(ipKey)
-		h.limiter.Fail(userKey)
-		apierror.Write(c, apierror.Unauthorized("invalid username or password"))
-		return
-	}
-	if err != nil {
-		apierror.Write(c, err)
-		return
-	}
-
-	h.limiter.Reset(userKey)
-	c.JSON(http.StatusOK, gin.H{"token": result.Token, "expires_at": result.ExpiresAt, "user": newUserResponse(result.User)})
-}
-
-// Logout handles POST /admin/v1/auth/logout.
-func (h *Handler) Logout(c *gin.Context) {
-	if err := h.auth.Logout(c.Request.Context(), bearerToken(c)); err != nil {
-		apierror.Write(c, err)
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
-// Me handles GET /admin/v1/auth/me.
-func (h *Handler) Me(c *gin.Context) {
-	c.JSON(http.StatusOK, newUserResponse(FromContext(c)))
 }
 
 // ---- tenants --------------------------------------------------------------

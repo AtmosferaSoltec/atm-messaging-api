@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/apierror"
+	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/authtoken"
 )
 
 const contextKey = "tenant"
@@ -14,7 +15,7 @@ const contextKey = "tenant"
 // AuthMiddleware authenticates the request with `Authorization: Bearer <token>`,
 // the service token of ATM-Auth-API, and stores the tenant of its system in the
 // context. The tenant always comes from the token, never from a request parameter.
-func AuthMiddleware(service *Service, verifier *TokenVerifier) gin.HandlerFunc {
+func AuthMiddleware(service *Service, verifier *authtoken.Verifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, found := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
 		if !found {

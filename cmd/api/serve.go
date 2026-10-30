@@ -21,6 +21,7 @@ import (
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/session"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/tenant"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/webhook"
+	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/authtoken"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/database"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/httpserver"
 )
@@ -107,7 +108,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	verifier, err := tenant.NewTokenVerifier(cfg.Auth.PublicKeyBase64, cfg.Auth.Issuer)
+	verifier, err := authtoken.New(cfg.Auth.PublicKeyBase64, cfg.Auth.Issuer)
 	if err != nil {
 		return err
 	}
@@ -122,16 +123,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	connectLinks := connect.NewService(connect.NewRepository(pool), sessions, cfg.Web.ConnectLinkTTL)
 	connect.RegisterRoutes(engine.Group("/public", cors), connect.NewHandler(connectLinks))
 
-	if cfg.Admin.Enabled() {
-		adminAuth, err := admin.NewAuthService(cfg.Admin.User, cfg.Admin.Password, cfg.Admin.SessionTTL)
-		if err != nil {
-			return err
-		}
-		adminHandler := admin.NewHandler(adminAuth, tenants, sessions, messages, webhooks, connectLinks, cfg.Web.URL)
-		admin.RegisterRoutes(engine.Group("/admin/v1", cors), adminHandler, adminAuth)
-	} else {
-		log.Warn("admin API disabled: set ADMIN_USER and ADMIN_PASSWORD to enable it")
-	}
+	adminHandler := admin.NewHandler(tenants, sessions, messages, webhooks, connectLinks, cfg.Web.URL)
+	admin.RegisterRoutes(engine.Group("/admin/v1", cors), adminHandler, verifier)
 
 	runErr := server.Run(ctx)
 

@@ -59,8 +59,8 @@ docker ps --filter name=messaging              # ambos "healthy"
 curl https://messaging-api.atmosferast.com/health   # {"status":"ok"}
 ```
 
-Entrar a https://messaging.atmosferast.com con `ADMIN_USER` / `ADMIN_PASSWORD`, crear un sistema,
-una conexión y probar el link de vinculación.
+Entrar a https://console.atmosferast.com como superadmin, abrir Mensajería, crear una conexión
+y probar el link de vinculación. Los sistemas aparecen solos la primera vez que llaman con su token.
 
 ## Notas operativas
 

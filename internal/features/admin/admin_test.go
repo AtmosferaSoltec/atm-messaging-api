@@ -21,137 +21,8 @@ import (
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/tenant"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/webhook"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/apierror"
+	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/authtoken"
 )
-
-const testPassword = "a-long-password-1"
-
-func newTestAuth(t *testing.T) *AuthService {
-	t.Helper()
-	auth, err := NewAuthService("joel", testPassword, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return auth
-}
-
-// ---- auth service ---------------------------------------------------------
-
-func TestNewAuthServiceOnlyRequiresNonEmptyCredentials(t *testing.T) {
-	for _, password := range []string{"1234", "abc", "a", "simple password with spaces"} {
-		auth, err := NewAuthService("joel", password, time.Hour)
-		if err != nil {
-			t.Fatalf("%q: any non-empty password must be accepted, got %v", password, err)
-		}
-		if _, err := auth.Login(context.Background(), "joel", password); err != nil {
-			t.Errorf("%q: login with the configured password must work: %v", password, err)
-		}
-	}
-
-	if _, err := NewAuthService("joel", "", time.Hour); err == nil {
-		t.Error("an empty password must be rejected")
-	}
-	if _, err := NewAuthService("  ", "1234", time.Hour); err == nil {
-		t.Error("an empty user must be rejected")
-	}
-}
-
-func TestLoginAndAuthenticate(t *testing.T) {
-	auth := newTestAuth(t)
-
-	result, err := auth.Login(context.Background(), " joel ", testPassword)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(result.Token, "adm_") || result.User.Username != "joel" {
-		t.Errorf("unexpected login result %+v", result)
-	}
-	for hash := range auth.tokens {
-		if hash == result.Token {
-			t.Error("the token itself must never be stored, only its hash")
-		}
-	}
-
-	if user, err := auth.Authenticate(context.Background(), result.Token); err != nil || user.Username != "joel" {
-		t.Fatalf("a fresh token must authenticate, got %v / %v", user, err)
-	}
-	if err := auth.Logout(context.Background(), result.Token); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := auth.Authenticate(context.Background(), result.Token); !errors.Is(err, ErrInvalidToken) {
-		t.Errorf("a logged-out token must stop working, got %v", err)
-	}
-}
-
-func TestLoginFailuresAreIndistinguishable(t *testing.T) {
-	auth := newTestAuth(t)
-	cases := map[string][2]string{
-		"wrong password": {"joel", "wrong-password-123"},
-		"wrong user":     {"someone", testPassword},
-		"both wrong":     {"someone", "wrong-password-123"},
-		"empty":          {"", ""},
-		"oversized":      {strings.Repeat("a", 1000), testPassword},
-	}
-	for name, c := range cases {
-		if _, err := auth.Login(context.Background(), c[0], c[1]); !errors.Is(err, ErrInvalidCredentials) {
-			t.Errorf("%s: expected ErrInvalidCredentials, got %v", name, err)
-		}
-	}
-}
-
-func TestExpiredTokensAndTenantKeysAreRejected(t *testing.T) {
-	auth := newTestAuth(t)
-	result, _ := auth.Login(context.Background(), "joel", testPassword)
-
-	if _, err := auth.Authenticate(context.Background(), "atm_a-tenant-api-key"); !errors.Is(err, ErrInvalidToken) {
-		t.Errorf("a tenant API key is not an admin token, got %v", err)
-	}
-
-	auth.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	if _, err := auth.Authenticate(context.Background(), result.Token); !errors.Is(err, ErrInvalidToken) {
-		t.Errorf("an expired token must be rejected, got %v", err)
-	}
-	if _, err := auth.Login(context.Background(), "joel", testPassword); err != nil {
-		t.Fatal(err)
-	}
-	if len(auth.tokens) != 1 {
-		t.Errorf("expired tokens should be purged on the next login, have %d", len(auth.tokens))
-	}
-}
-
-// ---- limiter --------------------------------------------------------------
-
-func TestLoginLimiter(t *testing.T) {
-	now := time.Now()
-	limiter := newLoginLimiter()
-	limiter.now = func() time.Time { return now }
-
-	for i := 0; i < maxLoginFailures-1; i++ {
-		limiter.Fail("ip:1")
-	}
-	if limiter.Blocked("ip:1") {
-		t.Fatal("should not block before the limit")
-	}
-	limiter.Fail("ip:1")
-	if !limiter.Blocked("ip:1") {
-		t.Fatal("should block at the limit")
-	}
-	if limiter.Blocked("ip:2") {
-		t.Error("other keys are unaffected")
-	}
-
-	now = now.Add(loginWindow + time.Second)
-	if limiter.Blocked("ip:1") {
-		t.Error("failures older than the window are forgiven")
-	}
-
-	for i := 0; i < maxLoginFailures; i++ {
-		limiter.Fail("email:a")
-	}
-	limiter.Reset("email:a")
-	if limiter.Blocked("email:a") {
-		t.Error("a successful login resets the key")
-	}
-}
 
 // ---- http -----------------------------------------------------------------
 
@@ -306,7 +177,7 @@ func (*fakeWebhooks) CountByStatus(context.Context, *uuid.UUID) (map[webhook.Sta
 
 type api struct {
 	router   *gin.Engine
-	password string
+	signer   *authtoken.Signer
 	tenants  *fakeTenants
 	sessions *fakeSessions
 	links    *fakeLinks
@@ -317,17 +188,17 @@ type api struct {
 func newAPI(t *testing.T) *api {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	auth := newTestAuth(t)
+	verifier, signer := authtoken.NewForTest(t)
 
 	tenants := &fakeTenants{tenants: map[uuid.UUID]tenant.Tenant{}}
 	sessions := &fakeSessions{}
 	links := &fakeLinks{}
 	messages := &fakeMessages{}
 	webhooks := &fakeWebhooks{}
-	handler := NewHandler(auth, tenants, sessions, messages, webhooks, links, "https://panel.example.com/")
+	handler := NewHandler(tenants, sessions, messages, webhooks, links, "https://panel.example.com/")
 	router := gin.New()
-	RegisterRoutes(router.Group("/admin/v1"), handler, auth)
-	return &api{router: router, password: testPassword, tenants: tenants, sessions: sessions, links: links, messages: messages, webhooks: webhooks}
+	RegisterRoutes(router.Group("/admin/v1"), handler, verifier)
+	return &api{router: router, signer: signer, tenants: tenants, sessions: sessions, links: links, messages: messages, webhooks: webhooks}
 }
 
 func (a *api) do(method, path, token string, body any) *httptest.ResponseRecorder {
@@ -348,24 +219,16 @@ func (a *api) do(method, path, token string, body any) *httptest.ResponseRecorde
 	return rec
 }
 
+// login returns the access token of a superadmin of ATM-Auth-API.
 func (a *api) login(t *testing.T) string {
 	t.Helper()
-	rec := a.do(http.MethodPost, "/admin/v1/auth/login", "", map[string]string{"username": "joel", "password": a.password})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("login failed: %d %s", rec.Code, rec.Body)
-	}
-	var body struct {
-		Token string `json:"token"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	return body.Token
+	return a.signer.Token("admin-1", "superadmin", time.Hour)
 }
 
-func TestEveryAdminRouteExceptLoginRequiresAToken(t *testing.T) {
+func TestEveryAdminRouteRequiresASuperadminToken(t *testing.T) {
 	a := newAPI(t)
 	id := uuid.NewString()
 	routes := []struct{ method, path string }{
-		{"POST", "/admin/v1/auth/logout"}, {"GET", "/admin/v1/auth/me"},
 		{"POST", "/admin/v1/sessions"}, {"POST", "/admin/v1/sessions/" + id + "/connect-link"}, {"POST", "/admin/v1/sessions/" + id + "/disconnect"},
 		{"GET", "/admin/v1/tenants"}, {"POST", "/admin/v1/tenants"}, {"GET", "/admin/v1/tenants/" + id},
 		{"PATCH", "/admin/v1/tenants/" + id},
@@ -382,24 +245,15 @@ func TestEveryAdminRouteExceptLoginRequiresAToken(t *testing.T) {
 		if rec := a.do(r.method, r.path, "atm_a-tenant-api-key", nil); rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s with a tenant API key: expected 401, got %d", r.method, r.path, rec.Code)
 		}
-	}
-}
-
-func TestLoginThrottling(t *testing.T) {
-	a := newAPI(t)
-	bad := map[string]string{"username": "joel", "password": "wrong-password-xx"}
-
-	for i := 0; i < maxLoginFailures; i++ {
-		if rec := a.do(http.MethodPost, "/admin/v1/auth/login", "", bad); rec.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: expected 401, got %d", i+1, rec.Code)
+		if rec := a.do(r.method, r.path, a.signer.Token("system:hotel", "service", time.Hour), nil); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s with a service token: expected 403, got %d", r.method, r.path, rec.Code)
 		}
-	}
-	if rec := a.do(http.MethodPost, "/admin/v1/auth/login", "", bad); rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("after %d failures expected 429, got %d", maxLoginFailures, rec.Code)
-	}
-	good := map[string]string{"username": "joel", "password": a.password}
-	if rec := a.do(http.MethodPost, "/admin/v1/auth/login", "", good); rec.Code != http.StatusTooManyRequests {
-		t.Errorf("even the right password must wait while blocked, got %d", rec.Code)
+		if rec := a.do(r.method, r.path, a.signer.Token("user-1", "user", time.Hour), nil); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s with an ordinary user token: expected 403, got %d", r.method, r.path, rec.Code)
+		}
+		if rec := a.do(r.method, r.path, a.signer.Token("admin-1", "superadmin", -time.Minute), nil); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s with an expired token: expected 401, got %d", r.method, r.path, rec.Code)
+		}
 	}
 }
 

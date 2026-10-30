@@ -1,4 +1,6 @@
-package tenant
+// Package authtoken validates the access tokens of ATM-Auth-API locally, with its
+// public key. It never calls auth on a request.
+package authtoken
 
 import (
 	"crypto/rsa"
@@ -9,24 +11,30 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const systemSubjectPrefix = "system:"
+const (
+	systemSubjectPrefix = "system:"
+	roleService         = "service"
+	roleSuperadmin      = "superadmin"
+)
 
-// serviceClaims are the claims of a service token issued by ATM-Auth-API
-// (POST /v1/token): role "service" and subject "system:<code>".
-type serviceClaims struct {
+// ErrInvalidToken: the token is malformed, expired, from another issuer, or not
+// of the kind the caller asked for.
+var ErrInvalidToken = errors.New("invalid token")
+
+type claims struct {
 	jwt.RegisteredClaims
 	Role string `json:"role"`
+	Name string `json:"name"`
 }
 
-// TokenVerifier validates service tokens locally with the public key of
-// ATM-Auth-API. It never calls auth on a request.
-type TokenVerifier struct {
+// Verifier checks tokens signed by ATM-Auth-API.
+type Verifier struct {
 	key    *rsa.PublicKey
 	issuer string
 }
 
-// NewTokenVerifier parses the base64 PEM public key of ATM-Auth-API.
-func NewTokenVerifier(publicKeyBase64, issuer string) (*TokenVerifier, error) {
+// New parses the base64 PEM public key of ATM-Auth-API.
+func New(publicKeyBase64, issuer string) (*Verifier, error) {
 	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(publicKeyBase64))
 	if err != nil {
 		return nil, errors.New("invalid AUTH_PUBLIC_KEY_BASE64")
@@ -35,19 +43,49 @@ func NewTokenVerifier(publicKeyBase64, issuer string) (*TokenVerifier, error) {
 	if err != nil || key.N.BitLen() < 2048 {
 		return nil, errors.New("invalid RSA public key (minimum 2048 bits)")
 	}
-	return &TokenVerifier{key: key, issuer: issuer}, nil
+	return &Verifier{key: key, issuer: issuer}, nil
 }
 
-// SystemCode checks the token and returns the code of the system it was issued to.
-func (v *TokenVerifier) SystemCode(raw string) (string, error) {
-	var claims serviceClaims
-	_, err := jwt.ParseWithClaims(raw, &claims,
+func (v *Verifier) verify(raw string) (claims, error) {
+	var c claims
+	_, err := jwt.ParseWithClaims(raw, &c,
 		func(*jwt.Token) (any, error) { return v.key, nil },
 		jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(v.issuer),
 		jwt.WithExpirationRequired(), jwt.WithIssuedAt())
-	code, isSystem := strings.CutPrefix(claims.Subject, systemSubjectPrefix)
-	if err != nil || claims.Role != "service" || !isSystem || code == "" {
-		return "", errors.New("invalid service token")
+	if err != nil || c.Subject == "" {
+		return claims{}, ErrInvalidToken
+	}
+	return c, nil
+}
+
+// SystemCode checks a service token and returns the code of the system it was issued to.
+func (v *Verifier) SystemCode(raw string) (string, error) {
+	c, err := v.verify(raw)
+	code, isSystem := strings.CutPrefix(c.Subject, systemSubjectPrefix)
+	if err != nil || c.Role != roleService || !isSystem || code == "" {
+		return "", ErrInvalidToken
 	}
 	return code, nil
 }
+
+// Operator is the superadmin a user token belongs to.
+type Operator struct {
+	Subject string
+	Name    string
+}
+
+// Superadmin checks a user token and returns the superadmin it belongs to. A valid
+// token of any other role fails with ErrNotSuperadmin.
+func (v *Verifier) Superadmin(raw string) (Operator, error) {
+	c, err := v.verify(raw)
+	if err != nil {
+		return Operator{}, err
+	}
+	if c.Role != roleSuperadmin {
+		return Operator{}, ErrNotSuperadmin
+	}
+	return Operator{Subject: c.Subject, Name: c.Name}, nil
+}
+
+// ErrNotSuperadmin: the token is valid but its owner is not a superadmin.
+var ErrNotSuperadmin = errors.New("not a superadmin")

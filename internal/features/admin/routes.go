@@ -4,22 +4,20 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/AtmosferaSoltec/atm-messaging-api/internal/platform/authtoken"
 )
 
-// RegisterRoutes mounts the administration routes. group is /admin/v1; login is
-// public and everything else requires an admin token.
-func RegisterRoutes(group *gin.RouterGroup, handler *Handler, auth *AuthService) {
+// RegisterRoutes mounts the administration routes. group is /admin/v1; everything
+// requires the access token of a superadmin of ATM-Auth-API.
+func RegisterRoutes(group *gin.RouterGroup, handler *Handler, verifier *authtoken.Verifier) {
 	// Browsers send an OPTIONS preflight before calling with an Authorization
 	// header. Without a route Gin would answer 404 before the group's CORS
 	// middleware runs; that middleware answers allowed origins, others get an
 	// empty 204 with no CORS headers and the browser blocks the call.
 	group.OPTIONS("/*path", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
-	group.POST("/auth/login", handler.Login)
-
-	protected := group.Group("", RequireAdmin(auth))
-	protected.POST("/auth/logout", handler.Logout)
-	protected.GET("/auth/me", handler.Me)
+	protected := group.Group("", RequireAdmin(verifier))
 
 	protected.GET("/tenants", handler.ListTenants)
 	protected.POST("/tenants", handler.CreateTenant)
