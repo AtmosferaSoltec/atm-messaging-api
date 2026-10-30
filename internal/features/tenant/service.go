@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -12,7 +13,11 @@ import (
 // Errors returned by the Service.
 var (
 	ErrInvalidAPIKey = errors.New("invalid api key")
-	ErrInvalidName   = errors.New("tenant name must be between 1 and 100 characters")
+	// ErrInvalidCredentials: a valid service token whose system has no active tenant.
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrInvalidName        = errors.New("tenant name must be between 1 and 100 characters")
+	// ErrInvalidSystemCode: the code is lowercase letters, digits, '-' or '_', up to 50 characters.
+	ErrInvalidSystemCode = errors.New("system code must be lowercase letters, digits, '-' or '_' (max 50)")
 )
 
 // Service holds the tenant business rules.
@@ -68,6 +73,33 @@ func (s *Service) Authenticate(ctx context.Context, apiKey string) (Tenant, erro
 		return Tenant{}, ErrInvalidAPIKey
 	}
 	return t, nil
+}
+
+var systemCodePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,49}$`)
+
+// AuthenticateSystem resolves the tenant linked to the system a service token
+// was issued to. Unknown or inactive tenants fail like an invalid credential.
+func (s *Service) AuthenticateSystem(ctx context.Context, systemCode string) (Tenant, error) {
+	t, err := s.repo.FindBySystemCode(ctx, systemCode)
+	if errors.Is(err, ErrNotFound) {
+		return Tenant{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return Tenant{}, err
+	}
+	if !t.IsActive {
+		return Tenant{}, ErrInvalidCredentials
+	}
+	return t, nil
+}
+
+// SetSystemCode links the tenant to a system of ATM-Auth-API; an empty code unlinks it.
+func (s *Service) SetSystemCode(ctx context.Context, id uuid.UUID, code string) error {
+	code = strings.TrimSpace(code)
+	if code != "" && !systemCodePattern.MatchString(code) {
+		return ErrInvalidSystemCode
+	}
+	return s.repo.SetSystemCode(ctx, id, code)
 }
 
 // Get returns a tenant by ID.

@@ -67,7 +67,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 ## Endpoints v1 (MVP)
 
 - `POST   /v1/sessions` create session (body: `account_ref`, `channel`; 409 if the account already has one for that channel)
-- Auth: `Authorization: Bearer <api key>` on everything under `/v1`. `GET /health` is public.
+- Auth: `Authorization: Bearer <credential>` on everything under `/v1`. `GET /health` is public. The credential is the service token of ATM-Auth-API (`POST /v1/token`, subject `system:<code>`), validated locally with `AUTH_PUBLIC_KEY_BASE64` + `AUTH_ISSUER`; the tenant is the one whose `system_code` equals that code (link it with `PATCH /admin/v1/tenants/{id} {"system_code"}`). Legacy API keys (`atm_...`) still work while systems migrate.
 - Message types: `text`, `image` (jpeg/png/webp), `video` (mp4), `audio` (mp3/ogg, sent as an audio file, no caption) and `document` (pdf, docx, xlsx, pptx, txt, csv); max 16 MiB decoded. The file's real content must match its declared `mime_type`.
 - `POST /v1/messages` body: `account_ref`, `channel`, `to`, `type`, `body`, optional `priority`, `idempotency_key`, `attachment` `{filename, mime_type, content_base64}` (images jpeg/png/webp, documents pdf, max 16 MiB decoded)
 - `GET    /v1/sessions?account_ref=` list

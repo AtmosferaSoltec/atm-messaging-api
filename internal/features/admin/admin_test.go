@@ -190,6 +190,15 @@ func (f *fakeTenants) Update(_ context.Context, id uuid.UUID, name *string, acti
 	f.tenants[id] = t
 	return t, nil
 }
+func (f *fakeTenants) SetSystemCode(_ context.Context, id uuid.UUID, code string) error {
+	t, ok := f.tenants[id]
+	if !ok {
+		return tenant.ErrNotFound
+	}
+	t.SystemCode = code
+	f.tenants[id] = t
+	return nil
+}
 func (f *fakeTenants) RotateAPIKey(_ context.Context, id uuid.UUID) (tenant.Created, error) {
 	t, ok := f.tenants[id]
 	if !ok {

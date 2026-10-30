@@ -80,6 +80,31 @@ func (f *fakeRepository) Update(_ context.Context, id uuid.UUID, name *string, i
 	return Tenant{}, ErrNotFound
 }
 
+func (f *fakeRepository) FindBySystemCode(_ context.Context, code string) (Tenant, error) {
+	for _, t := range f.byHash {
+		if t.SystemCode == code && code != "" {
+			return t, nil
+		}
+	}
+	return Tenant{}, ErrNotFound
+}
+
+func (f *fakeRepository) SetSystemCode(_ context.Context, id uuid.UUID, code string) error {
+	for hash, t := range f.byHash {
+		if t.ID == id {
+			for _, other := range f.byHash {
+				if other.ID != id && code != "" && other.SystemCode == code {
+					return ErrSystemCodeTaken
+				}
+			}
+			t.SystemCode = code
+			f.byHash[hash] = t
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
 func (f *fakeRepository) UpdateWebhookURL(_ context.Context, id uuid.UUID, url string) error {
 	for hash, t := range f.byHash {
 		if t.ID == id {
@@ -178,7 +203,7 @@ func TestAuthMiddleware(t *testing.T) {
 	created, _ := service.Create(context.Background(), "Tenant")
 
 	router := gin.New()
-	router.GET("/protected", AuthMiddleware(service), func(c *gin.Context) {
+	router.GET("/protected", AuthMiddleware(service, nil), func(c *gin.Context) {
 		c.String(http.StatusOK, FromContext(c).ID.String())
 	})
 

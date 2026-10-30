@@ -30,6 +30,15 @@ type Webhook struct {
 	AllowPrivate bool
 }
 
+// Auth is the public key and issuer of ATM-Auth-API.
+type Auth struct {
+	PublicKeyBase64 string
+	Issuer          string
+}
+
+// Enabled reports whether service tokens can be validated.
+func (a Auth) Enabled() bool { return a.PublicKeyBase64 != "" && a.Issuer != "" }
+
 // Admin configures the single operator of the panel. The admin API is only
 // served when both User and Password are set.
 type Admin struct {
@@ -61,6 +70,9 @@ type Config struct {
 	Webhook     Webhook
 	Admin       Admin
 	Web         Web
+	// Auth lets the service validate the service tokens of ATM-Auth-API. Optional
+	// while systems still use API keys.
+	Auth Auth
 	// TrustedProxies are reverse proxies whose X-Forwarded-For is believed.
 	TrustedProxies []string
 }
@@ -97,6 +109,10 @@ func Load() (Config, error) {
 	cfg.Admin = Admin{User: os.Getenv("ADMIN_USER"), Password: os.Getenv("ADMIN_PASSWORD"), SessionTTL: 12 * time.Hour}
 	if (cfg.Admin.User == "") != (cfg.Admin.Password == "") {
 		return Config{}, errors.New("ADMIN_USER and ADMIN_PASSWORD must be set together")
+	}
+	cfg.Auth = Auth{PublicKeyBase64: os.Getenv("AUTH_PUBLIC_KEY_BASE64"), Issuer: os.Getenv("AUTH_ISSUER")}
+	if (cfg.Auth.PublicKeyBase64 == "") != (cfg.Auth.Issuer == "") {
+		return Config{}, errors.New("AUTH_PUBLIC_KEY_BASE64 and AUTH_ISSUER must be set together")
 	}
 	cfg.Web = Web{
 		URL:            getEnv("PUBLIC_WEB_URL", "http://localhost:5173"),

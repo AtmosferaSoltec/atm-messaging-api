@@ -31,6 +31,7 @@ type TenantService interface {
 	List(ctx context.Context) ([]tenant.Tenant, error)
 	Update(ctx context.Context, id uuid.UUID, name *string, isActive *bool) (tenant.Tenant, error)
 	RotateAPIKey(ctx context.Context, id uuid.UUID) (tenant.Created, error)
+	SetSystemCode(ctx context.Context, id uuid.UUID, code string) error
 }
 
 // SessionService manages sessions across tenants.
@@ -159,6 +160,7 @@ type TenantResponse struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
 	APIKeyPrefix string    `json:"api_key_prefix"`
+	SystemCode   string    `json:"system_code"`
 	IsActive     bool      `json:"is_active"`
 	WebhookURL   string    `json:"webhook_url"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -166,7 +168,7 @@ type TenantResponse struct {
 
 func newTenantResponse(t tenant.Tenant) TenantResponse {
 	return TenantResponse{
-		ID: t.ID.String(), Name: t.Name, APIKeyPrefix: t.APIKeyPrefix,
+		ID: t.ID.String(), Name: t.Name, APIKeyPrefix: t.APIKeyPrefix, SystemCode: t.SystemCode,
 		IsActive: t.IsActive, WebhookURL: t.WebhookURL, CreatedAt: t.CreatedAt,
 	}
 }
@@ -271,14 +273,28 @@ func (h *Handler) UpdateTenant(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name     *string `json:"name"`
-		IsActive *bool   `json:"is_active"`
+		Name       *string `json:"name"`
+		IsActive   *bool   `json:"is_active"`
+		SystemCode *string `json:"system_code"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || (req.Name == nil && req.IsActive == nil) {
-		apierror.Write(c, apierror.BadRequest("invalid_request", "send name and/or is_active"))
+	if err := c.ShouldBindJSON(&req); err != nil || (req.Name == nil && req.IsActive == nil && req.SystemCode == nil) {
+		apierror.Write(c, apierror.BadRequest("invalid_request", "send name, is_active and/or system_code"))
 		return
 	}
-	t, err := h.tenants.Update(c.Request.Context(), id, req.Name, req.IsActive)
+	ctx := c.Request.Context()
+	if req.SystemCode != nil {
+		if err := h.tenants.SetSystemCode(ctx, id, *req.SystemCode); err != nil {
+			apierror.Write(c, translate(err))
+			return
+		}
+	}
+	var t tenant.Tenant
+	var err error
+	if req.Name != nil || req.IsActive != nil {
+		t, err = h.tenants.Update(ctx, id, req.Name, req.IsActive)
+	} else {
+		t, err = h.tenants.Get(ctx, id)
+	}
 	if err != nil {
 		apierror.Write(c, translate(err))
 		return
@@ -851,6 +867,10 @@ func translate(err error) error {
 		return apierror.NotFound("tenant_not_found", "tenant not found")
 	case errors.Is(err, tenant.ErrInvalidName):
 		return apierror.BadRequest("invalid_name", err.Error())
+	case errors.Is(err, tenant.ErrInvalidSystemCode):
+		return apierror.BadRequest("invalid_system_code", err.Error())
+	case errors.Is(err, tenant.ErrSystemCodeTaken):
+		return apierror.Conflict("system_code_taken", err.Error())
 	case errors.Is(err, tenant.ErrNameTaken):
 		return apierror.Conflict("tenant_name_taken", "a tenant with this name already exists")
 	case errors.Is(err, session.ErrNotFound):

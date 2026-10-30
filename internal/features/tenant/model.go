@@ -13,6 +13,7 @@ type Tenant struct {
 	ID            uuid.UUID
 	Name          string
 	APIKeyPrefix  string
+	SystemCode    string // code of the system in ATM-Auth-API; empty until linked
 	WebhookSecret string
 	WebhookURL    string // empty when the tenant has not configured webhooks
 	IsActive      bool
