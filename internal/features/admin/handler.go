@@ -26,12 +26,10 @@ import (
 
 // TenantService manages tenants.
 type TenantService interface {
-	Create(ctx context.Context, name string) (tenant.Created, error)
+	Provision(ctx context.Context, systemCode string) (tenant.Tenant, error)
 	Get(ctx context.Context, id uuid.UUID) (tenant.Tenant, error)
 	List(ctx context.Context) ([]tenant.Tenant, error)
 	Update(ctx context.Context, id uuid.UUID, name *string, isActive *bool) (tenant.Tenant, error)
-	RotateAPIKey(ctx context.Context, id uuid.UUID) (tenant.Created, error)
-	SetSystemCode(ctx context.Context, id uuid.UUID, code string) error
 }
 
 // SessionService manages sessions across tenants.
@@ -154,37 +152,21 @@ func (h *Handler) Me(c *gin.Context) {
 
 // ---- tenants --------------------------------------------------------------
 
-// TenantResponse is the public representation of a tenant. The API key and
-// webhook secret never appear here after creation.
+// TenantResponse is the public representation of a tenant. The webhook secret
+// is not here: the operator reads it from the webhook endpoint.
 type TenantResponse struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	APIKeyPrefix string    `json:"api_key_prefix"`
-	SystemCode   string    `json:"system_code"`
-	IsActive     bool      `json:"is_active"`
-	WebhookURL   string    `json:"webhook_url"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	SystemCode string    `json:"system_code"`
+	IsActive   bool      `json:"is_active"`
+	WebhookURL string    `json:"webhook_url"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 func newTenantResponse(t tenant.Tenant) TenantResponse {
 	return TenantResponse{
-		ID: t.ID.String(), Name: t.Name, APIKeyPrefix: t.APIKeyPrefix, SystemCode: t.SystemCode,
+		ID: t.ID.String(), Name: t.Name, SystemCode: t.SystemCode,
 		IsActive: t.IsActive, WebhookURL: t.WebhookURL, CreatedAt: t.CreatedAt,
-	}
-}
-
-// CredentialsResponse carries a tenant together with the secrets shown only once.
-type CredentialsResponse struct {
-	TenantResponse
-	APIKey        string `json:"api_key"`
-	WebhookSecret string `json:"webhook_secret"`
-}
-
-func newCredentialsResponse(created tenant.Created) CredentialsResponse {
-	return CredentialsResponse{
-		TenantResponse: newTenantResponse(created.Tenant),
-		APIKey:         created.APIKey,
-		WebhookSecret:  created.Tenant.WebhookSecret,
 	}
 }
 
@@ -235,21 +217,23 @@ func sumCounts[K comparable](counts map[K]int) int {
 	return total
 }
 
-// CreateTenant handles POST /admin/v1/tenants.
+// CreateTenant handles POST /admin/v1/tenants. Tenants appear by themselves when
+// a system first calls the API; this lets the operator set one up (webhook, limits)
+// before that. It is idempotent: an existing tenant is returned as it is.
 func (h *Handler) CreateTenant(c *gin.Context) {
 	var req struct {
-		Name string `json:"name" binding:"required"`
+		SystemCode string `json:"system_code" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		apierror.Write(c, apierror.BadRequest("invalid_request", "name is required"))
+		apierror.Write(c, apierror.BadRequest("invalid_request", "system_code is required"))
 		return
 	}
-	created, err := h.tenants.Create(c.Request.Context(), req.Name)
+	t, err := h.tenants.Provision(c.Request.Context(), req.SystemCode)
 	if err != nil {
 		apierror.Write(c, translate(err))
 		return
 	}
-	c.JSON(http.StatusCreated, newCredentialsResponse(created))
+	c.JSON(http.StatusOK, newTenantResponse(t))
 }
 
 // GetTenant handles GET /admin/v1/tenants/:id.
@@ -273,47 +257,19 @@ func (h *Handler) UpdateTenant(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name       *string `json:"name"`
-		IsActive   *bool   `json:"is_active"`
-		SystemCode *string `json:"system_code"`
+		Name     *string `json:"name"`
+		IsActive *bool   `json:"is_active"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || (req.Name == nil && req.IsActive == nil && req.SystemCode == nil) {
-		apierror.Write(c, apierror.BadRequest("invalid_request", "send name, is_active and/or system_code"))
+	if err := c.ShouldBindJSON(&req); err != nil || (req.Name == nil && req.IsActive == nil) {
+		apierror.Write(c, apierror.BadRequest("invalid_request", "send name and/or is_active"))
 		return
 	}
-	ctx := c.Request.Context()
-	if req.SystemCode != nil {
-		if err := h.tenants.SetSystemCode(ctx, id, *req.SystemCode); err != nil {
-			apierror.Write(c, translate(err))
-			return
-		}
-	}
-	var t tenant.Tenant
-	var err error
-	if req.Name != nil || req.IsActive != nil {
-		t, err = h.tenants.Update(ctx, id, req.Name, req.IsActive)
-	} else {
-		t, err = h.tenants.Get(ctx, id)
-	}
+	t, err := h.tenants.Update(c.Request.Context(), id, req.Name, req.IsActive)
 	if err != nil {
 		apierror.Write(c, translate(err))
 		return
 	}
 	c.JSON(http.StatusOK, newTenantResponse(t))
-}
-
-// RotateKey handles POST /admin/v1/tenants/:id/rotate-key.
-func (h *Handler) RotateKey(c *gin.Context) {
-	id, ok := parseUUID(c, "id", "tenant_not_found")
-	if !ok {
-		return
-	}
-	created, err := h.tenants.RotateAPIKey(c.Request.Context(), id)
-	if err != nil {
-		apierror.Write(c, translate(err))
-		return
-	}
-	c.JSON(http.StatusOK, newCredentialsResponse(created))
 }
 
 // SetTenantWebhook handles PUT /admin/v1/tenants/:id/webhook.
@@ -869,8 +825,6 @@ func translate(err error) error {
 		return apierror.BadRequest("invalid_name", err.Error())
 	case errors.Is(err, tenant.ErrInvalidSystemCode):
 		return apierror.BadRequest("invalid_system_code", err.Error())
-	case errors.Is(err, tenant.ErrSystemCodeTaken):
-		return apierror.Conflict("system_code_taken", err.Error())
 	case errors.Is(err, tenant.ErrNameTaken):
 		return apierror.Conflict("tenant_name_taken", "a tenant with this name already exists")
 	case errors.Is(err, session.ErrNotFound):

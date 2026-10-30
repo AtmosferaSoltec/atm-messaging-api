@@ -2,7 +2,6 @@
 //
 //	api serve                      start the HTTP server (default)
 //	api migrate up|down|status     manage database migrations
-//	api tenant create -name NAME   register a tenant and print its API key once
 //	api healthcheck                used by the image's HEALTHCHECK (the image has no curl)
 package main
 
@@ -48,10 +47,8 @@ func main() {
 		err = serve(ctx, log)
 	case "migrate":
 		err = migrate(ctx, log, args)
-	case "tenant":
-		err = tenantCommand(ctx, args)
 	default:
-		err = fmt.Errorf("unknown command %q (use serve, migrate or tenant)", command)
+		err = fmt.Errorf("unknown command %q (use serve or migrate)", command)
 	}
 	if err != nil {
 		log.Error("command failed", "command", command, "error", err)

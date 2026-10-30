@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -80,76 +79,65 @@ func TestSystemCode(t *testing.T) {
 	}
 }
 
-func TestAuthenticateSystem(t *testing.T) {
-	ctx := context.Background()
-	service := NewService(newFakeRepository())
-	created, err := service.Create(ctx, "La Vendimia")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := service.AuthenticateSystem(ctx, "lavendimia"); !errors.Is(err, ErrInvalidCredentials) {
-		t.Fatalf("unlinked system: err = %v", err)
-	}
-	if err := service.SetSystemCode(ctx, created.Tenant.ID, "Bad Code!"); !errors.Is(err, ErrInvalidSystemCode) {
-		t.Fatalf("invalid code: err = %v", err)
-	}
-	if err := service.SetSystemCode(ctx, created.Tenant.ID, "lavendimia"); err != nil {
-		t.Fatal(err)
-	}
-	got, err := service.AuthenticateSystem(ctx, "lavendimia")
-	if err != nil || got.ID != created.Tenant.ID {
-		t.Fatalf("linked system: %v, %v", got, err)
-	}
-
-	inactive := false
-	if _, err := service.Update(ctx, created.Tenant.ID, nil, &inactive); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.AuthenticateSystem(ctx, "lavendimia"); !errors.Is(err, ErrInvalidCredentials) {
-		t.Fatalf("inactive tenant: err = %v", err)
-	}
-}
-
-func TestAuthMiddlewareAcceptsTokenAndLegacyKey(t *testing.T) {
+func TestAuthMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ctx := context.Background()
 	service := NewService(newFakeRepository())
-	created, err := service.Create(ctx, "La Vendimia")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := service.SetSystemCode(ctx, created.Tenant.ID, "lavendimia"); err != nil {
-		t.Fatal(err)
-	}
 	verifier, key := newTestVerifier(t)
 
 	router := gin.New()
 	router.GET("/", AuthMiddleware(service, verifier), func(c *gin.Context) {
-		c.String(http.StatusOK, FromContext(c).ID.String())
+		c.String(http.StatusOK, FromContext(c).SystemCode)
 	})
 
 	for name, tt := range map[string]struct {
-		credential string
-		status     int
+		header string
+		status int
 	}{
-		"service token":   {signToken(t, key, "system:lavendimia", "service", time.Hour), http.StatusOK},
-		"legacy api key":  {created.APIKey, http.StatusOK},
-		"unlinked system": {signToken(t, key, "system:other", "service", time.Hour), http.StatusUnauthorized},
-		"user token":      {signToken(t, key, "user-1", "user", time.Hour), http.StatusUnauthorized},
-		"unknown api key": {"atm_nope", http.StatusUnauthorized},
+		"service token": {"Bearer " + signToken(t, key, "system:lavendimia", "service", time.Hour), http.StatusOK},
+		"user token":    {"Bearer " + signToken(t, key, "user-1", "user", time.Hour), http.StatusUnauthorized},
+		"expired token": {"Bearer " + signToken(t, key, "system:lavendimia", "service", -time.Second), http.StatusUnauthorized},
+		"old api key":   {"Bearer atm_oldkey", http.StatusUnauthorized},
+		"wrong scheme":  {"Basic " + signToken(t, key, "system:lavendimia", "service", time.Hour), http.StatusUnauthorized},
+		"no header":     {"", http.StatusUnauthorized},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			req.Header.Set("Authorization", "Bearer "+tt.credential)
+			if tt.header != "" {
+				req.Header.Set("Authorization", tt.header)
+			}
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			if rec.Code != tt.status {
 				t.Fatalf("status = %d, want %d (%s)", rec.Code, tt.status, rec.Body.String())
 			}
-			if tt.status == http.StatusOK && rec.Body.String() != created.Tenant.ID.String() {
+			if tt.status == http.StatusOK && rec.Body.String() != "lavendimia" {
 				t.Fatalf("wrong tenant: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestAuthMiddlewareRefusesAnInactiveTenant(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	service := NewService(newFakeRepository())
+	verifier, key := newTestVerifier(t)
+	created, err := service.Provision(ctx, "lavendimia")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inactive := false
+	if _, err := service.Update(ctx, created.ID, nil, &inactive); err != nil {
+		t.Fatal(err)
+	}
+
+	router := gin.New()
+	router.GET("/", AuthMiddleware(service, verifier), func(c *gin.Context) { c.Status(http.StatusOK) })
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+signToken(t, key, "system:lavendimia", "service", time.Hour))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }

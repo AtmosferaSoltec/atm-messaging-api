@@ -51,7 +51,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool) (tenantID, sessionID uuid.UUI
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO tenants (id, name, api_key_prefix, api_key_hash, webhook_secret) VALUES ($1, 'itest', 'atm_x', $2, 's')`, tenantID, tenantID.String()+tenantID.String()[:28])
+	exec(`INSERT INTO tenants (id, name, system_code, webhook_secret) VALUES ($1, 'itest', $2, 's')`, tenantID, "itest-"+tenantID.String())
 	exec(`INSERT INTO accounts (id, tenant_id, external_ref) VALUES ($1, $2, 'itest')`, accountID, tenantID)
 	exec(`INSERT INTO sessions (id, tenant_id, account_id, channel, status) VALUES ($1, $2, $3, 'whatsapp', 'connected')`, sessionID, tenantID, accountID)
 	t.Cleanup(func() {

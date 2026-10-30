@@ -12,7 +12,7 @@ import (
 const userContextKey = "admin"
 
 // RequireAdmin authenticates `Authorization: Bearer adm_...` with an admin
-// session token. Tenant API keys are not accepted here, and admin tokens are
+// session token. Service tokens are not accepted here, and admin tokens are
 // not accepted on /v1.
 func RequireAdmin(auth *AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {

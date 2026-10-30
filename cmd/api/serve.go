@@ -107,13 +107,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	var verifier *tenant.TokenVerifier
-	if cfg.Auth.Enabled() {
-		if verifier, err = tenant.NewTokenVerifier(cfg.Auth.PublicKeyBase64, cfg.Auth.Issuer); err != nil {
-			return err
-		}
-	} else {
-		log.Warn("AUTH_PUBLIC_KEY_BASE64 not set: only legacy API keys are accepted")
+	verifier, err := tenant.NewTokenVerifier(cfg.Auth.PublicKeyBase64, cfg.Auth.Issuer)
+	if err != nil {
+		return err
 	}
 
 	v1 := engine.Group("/v1", tenant.AuthMiddleware(tenants, verifier))

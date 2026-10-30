@@ -157,10 +157,15 @@ func TestLoginLimiter(t *testing.T) {
 
 type fakeTenants struct{ tenants map[uuid.UUID]tenant.Tenant }
 
-func (f *fakeTenants) Create(_ context.Context, name string) (tenant.Created, error) {
-	t := tenant.Tenant{ID: uuid.New(), Name: name, APIKeyPrefix: "atm_abc", WebhookSecret: "secret-1", IsActive: true}
+func (f *fakeTenants) Provision(_ context.Context, systemCode string) (tenant.Tenant, error) {
+	for _, t := range f.tenants {
+		if t.SystemCode == systemCode {
+			return t, nil
+		}
+	}
+	t := tenant.Tenant{ID: uuid.New(), Name: systemCode, SystemCode: systemCode, WebhookSecret: "secret-1", IsActive: true}
 	f.tenants[t.ID] = t
-	return tenant.Created{Tenant: t, APIKey: "atm_full-key"}, nil
+	return t, nil
 }
 func (f *fakeTenants) Get(_ context.Context, id uuid.UUID) (tenant.Tenant, error) {
 	t, ok := f.tenants[id]
@@ -189,22 +194,6 @@ func (f *fakeTenants) Update(_ context.Context, id uuid.UUID, name *string, acti
 	}
 	f.tenants[id] = t
 	return t, nil
-}
-func (f *fakeTenants) SetSystemCode(_ context.Context, id uuid.UUID, code string) error {
-	t, ok := f.tenants[id]
-	if !ok {
-		return tenant.ErrNotFound
-	}
-	t.SystemCode = code
-	f.tenants[id] = t
-	return nil
-}
-func (f *fakeTenants) RotateAPIKey(_ context.Context, id uuid.UUID) (tenant.Created, error) {
-	t, ok := f.tenants[id]
-	if !ok {
-		return tenant.Created{}, tenant.ErrNotFound
-	}
-	return tenant.Created{Tenant: t, APIKey: "atm_rotated-key"}, nil
 }
 
 type fakeSessions struct {
@@ -379,7 +368,7 @@ func TestEveryAdminRouteExceptLoginRequiresAToken(t *testing.T) {
 		{"POST", "/admin/v1/auth/logout"}, {"GET", "/admin/v1/auth/me"},
 		{"POST", "/admin/v1/sessions"}, {"POST", "/admin/v1/sessions/" + id + "/connect-link"}, {"POST", "/admin/v1/sessions/" + id + "/disconnect"},
 		{"GET", "/admin/v1/tenants"}, {"POST", "/admin/v1/tenants"}, {"GET", "/admin/v1/tenants/" + id},
-		{"PATCH", "/admin/v1/tenants/" + id}, {"POST", "/admin/v1/tenants/" + id + "/rotate-key"},
+		{"PATCH", "/admin/v1/tenants/" + id},
 		{"PUT", "/admin/v1/tenants/" + id + "/webhook"}, {"DELETE", "/admin/v1/tenants/" + id + "/webhook"},
 		{"GET", "/admin/v1/tenants/" + id + "/webhook/events"},
 		{"GET", "/admin/v1/sessions"}, {"GET", "/admin/v1/sessions/" + id}, {"DELETE", "/admin/v1/sessions/" + id},
@@ -414,37 +403,45 @@ func TestLoginThrottling(t *testing.T) {
 	}
 }
 
-func TestTenantCredentialsAreShownOnlyOnCreateAndRotate(t *testing.T) {
+func TestTenantSecretsAreNeverListed(t *testing.T) {
 	a := newAPI(t)
 	token := a.login(t)
 
-	rec := a.do(http.MethodPost, "/admin/v1/tenants", token, map[string]string{"name": "La Vendimia"})
-	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), "atm_full-key") || !strings.Contains(rec.Body.String(), "secret-1") {
-		t.Fatalf("creation must reveal the api key and secret once: %d %s", rec.Code, rec.Body)
+	rec := a.do(http.MethodPost, "/admin/v1/tenants", token, map[string]string{"system_code": "lavendimia"})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"system_code":"lavendimia"`) {
+		t.Fatalf("provisioning failed: %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "secret-1") {
+		t.Errorf("the tenant response must not carry the webhook secret: %s", rec.Body)
 	}
 	var created struct {
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &created)
 
+	if again := a.do(http.MethodPost, "/admin/v1/tenants", token, map[string]string{"system_code": "lavendimia"}); !strings.Contains(again.Body.String(), created.ID) {
+		t.Errorf("provisioning is idempotent: %s", again.Body)
+	}
+	if rec := a.do(http.MethodPost, "/admin/v1/tenants", token, map[string]string{}); rec.Code != http.StatusBadRequest {
+		t.Errorf("system_code is required, got %d", rec.Code)
+	}
+
 	for _, path := range []string{"/admin/v1/tenants", "/admin/v1/tenants/" + created.ID} {
 		body := a.do(http.MethodGet, path, token, nil).Body.String()
-		if strings.Contains(body, "atm_full-key") || strings.Contains(body, "secret-1") || strings.Contains(body, "api_key\"") {
+		if strings.Contains(body, "secret-1") || strings.Contains(body, "api_key") {
 			t.Errorf("%s must not expose secrets: %s", path, body)
 		}
 	}
-
-	rec = a.do(http.MethodPost, "/admin/v1/tenants/"+created.ID+"/rotate-key", token, nil)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "atm_rotated-key") {
-		t.Errorf("rotation must reveal the new key: %d %s", rec.Code, rec.Body)
+	if rec := a.do(http.MethodPost, "/admin/v1/tenants/"+created.ID+"/rotate-key", token, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("api keys no longer exist, got %d", rec.Code)
 	}
 }
 
 func TestUpdateTenantNeedsAChange(t *testing.T) {
 	a := newAPI(t)
 	token := a.login(t)
-	created, _ := a.tenants.Create(context.Background(), "Tenant")
-	path := "/admin/v1/tenants/" + created.Tenant.ID.String()
+	created, _ := a.tenants.Provision(context.Background(), "tenant")
+	path := "/admin/v1/tenants/" + created.ID.String()
 
 	if rec := a.do(http.MethodPatch, path, token, map[string]any{}); rec.Code != http.StatusBadRequest {
 		t.Errorf("an empty patch is a bad request, got %d", rec.Code)
@@ -477,7 +474,7 @@ func TestMessageListingNeverExposesContent(t *testing.T) {
 func TestMetricsAlwaysIncludeEveryStatus(t *testing.T) {
 	a := newAPI(t)
 	token := a.login(t)
-	_, _ = a.tenants.Create(context.Background(), "T1")
+	_, _ = a.tenants.Provision(context.Background(), "t1")
 
 	rec := a.do(http.MethodGet, "/admin/v1/metrics", token, nil)
 	if rec.Code != http.StatusOK {
@@ -524,8 +521,8 @@ func TestPreflightIsRoutedSoCORSMiddlewareCanAnswerIt(t *testing.T) {
 func TestOperatorCreatesASessionAndSharesAConnectLink(t *testing.T) {
 	a := newAPI(t)
 	token := a.login(t)
-	created, _ := a.tenants.Create(context.Background(), "La Vendimia")
-	tenantID := created.Tenant.ID.String()
+	created, _ := a.tenants.Provision(context.Background(), "lavendimia")
+	tenantID := created.ID.String()
 
 	rec := a.do(http.MethodPost, "/admin/v1/sessions", token,
 		map[string]string{"tenant_id": tenantID, "account_ref": "empresa-1", "channel": "whatsapp"})
@@ -556,8 +553,8 @@ func TestOperatorCreatesASessionAndSharesAConnectLink(t *testing.T) {
 func TestCreateSessionValidatesItsInput(t *testing.T) {
 	a := newAPI(t)
 	token := a.login(t)
-	created, _ := a.tenants.Create(context.Background(), "La Vendimia")
-	tenantID := created.Tenant.ID.String()
+	created, _ := a.tenants.Provision(context.Background(), "lavendimia")
+	tenantID := created.ID.String()
 
 	cases := map[string]struct {
 		body map[string]string
@@ -606,7 +603,7 @@ func TestDisconnectKeepsTheSession(t *testing.T) {
 func TestTenantListIncludesActivityCounters(t *testing.T) {
 	a := newAPI(t)
 	token := a.login(t)
-	_, _ = a.tenants.Create(context.Background(), "La Vendimia")
+	_, _ = a.tenants.Provision(context.Background(), "lavendimia")
 
 	rec := a.do(http.MethodGet, "/admin/v1/tenants", token, nil)
 	var body struct {

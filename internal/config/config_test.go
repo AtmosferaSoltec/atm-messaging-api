@@ -5,8 +5,16 @@ import (
 	"time"
 )
 
-func TestLoadAppliesDefaults(t *testing.T) {
+// setRequired sets the variables Load cannot start without.
+func setRequired(t *testing.T) {
+	t.Helper()
 	t.Setenv("DATABASE_URL", "postgresql://example")
+	t.Setenv("AUTH_PUBLIC_KEY_BASE64", "key")
+	t.Setenv("AUTH_ISSUER", "atm-auth-api")
+}
+
+func TestLoadAppliesDefaults(t *testing.T) {
+	setRequired(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -20,7 +28,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 }
 
 func TestLoadReadsOverrides(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgresql://example")
+	setRequired(t)
 	t.Setenv("LIMITS_PROMOTIONAL_MIN_DELAY", "2s")
 	t.Setenv("LIMITS_PROMOTIONAL_MAX_DELAY", "4s")
 	t.Setenv("LIMITS_PROMOTIONAL_DAILY_CAP", "50")
@@ -38,6 +46,8 @@ func TestLoadReadsOverrides(t *testing.T) {
 func TestLoadRejectsInvalidSettings(t *testing.T) {
 	cases := map[string]map[string]string{
 		"missing database url": {"DATABASE_URL": ""},
+		"missing auth key":     {"AUTH_PUBLIC_KEY_BASE64": ""},
+		"missing auth issuer":  {"AUTH_ISSUER": ""},
 		"bad duration":         {"LIMITS_PROMOTIONAL_MIN_DELAY": "soon"},
 		"bad integer":          {"LIMITS_WARMUP_DAYS": "many"},
 		"max below min":        {"LIMITS_PROMOTIONAL_MIN_DELAY": "30s", "LIMITS_PROMOTIONAL_MAX_DELAY": "10s"},
@@ -46,7 +56,7 @@ func TestLoadRejectsInvalidSettings(t *testing.T) {
 	}
 	for name, env := range cases {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("DATABASE_URL", "postgresql://example")
+			setRequired(t)
 			for key, value := range env {
 				t.Setenv(key, value)
 			}
@@ -58,7 +68,7 @@ func TestLoadRejectsInvalidSettings(t *testing.T) {
 }
 
 func TestWebhookPrivateTargetsAreOnlyAllowedInDevelopmentByDefault(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgresql://example")
+	setRequired(t)
 
 	t.Setenv("APP_ENV", "development")
 	cfg, _ := Load()
@@ -79,7 +89,7 @@ func TestWebhookPrivateTargetsAreOnlyAllowedInDevelopmentByDefault(t *testing.T)
 }
 
 func TestAdminAndWebSettings(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgresql://example")
+	setRequired(t)
 	t.Setenv("ADMIN_USER", "joel")
 	t.Setenv("ADMIN_PASSWORD", "a-long-password-1")
 	t.Setenv("ADMIN_SESSION_TTL", "2h")
@@ -105,7 +115,7 @@ func TestAdminAndWebSettings(t *testing.T) {
 }
 
 func TestAdminDefaultsAreSafe(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgresql://example")
+	setRequired(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +132,7 @@ func TestAdminDefaultsAreSafe(t *testing.T) {
 }
 
 func TestAdminCredentialsComeTogether(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgresql://example")
+	setRequired(t)
 	t.Setenv("ADMIN_USER", "joel")
 	if _, err := Load(); err == nil {
 		t.Error("a user without a password must be rejected")

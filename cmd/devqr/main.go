@@ -2,7 +2,7 @@
 // (GET /v1/sessions/{id}/qr/stream) and draws each QR code in the terminal,
 // until the web panel does that job.
 //
-//	ATM_API_KEY=atm_... go run ./cmd/devqr -session <session id>
+//	ATM_TOKEN=<service token> go run ./cmd/devqr -session <session id>
 package main
 
 import (
@@ -24,9 +24,9 @@ func main() {
 	sessionID := flag.String("session", "", "session id")
 	flag.Parse()
 
-	apiKey := os.Getenv("ATM_API_KEY")
-	if *sessionID == "" || apiKey == "" {
-		log.Fatal("usage: ATM_API_KEY=... devqr -session <id>")
+	token := os.Getenv("ATM_TOKEN")
+	if *sessionID == "" || token == "" {
+		log.Fatal("usage: ATM_TOKEN=... devqr -session <id>")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -36,7 +36,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

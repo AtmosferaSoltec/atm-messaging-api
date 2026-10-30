@@ -12,12 +12,9 @@ import (
 
 // Errors returned by the Service.
 var (
-	ErrInvalidAPIKey = errors.New("invalid api key")
-	// ErrInvalidCredentials: a valid service token whose system has no active tenant.
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrInvalidName        = errors.New("tenant name must be between 1 and 100 characters")
-	// ErrInvalidSystemCode: the code is lowercase letters, digits, '-' or '_', up to 50 characters.
-	ErrInvalidSystemCode = errors.New("system code must be lowercase letters, digits, '-' or '_' (max 50)")
+	ErrInvalidName = errors.New("tenant name must be between 1 and 100 characters")
+	// ErrInvalidSystemCode: the code is lowercase letters, digits, '-' or '_', starting with a letter.
+	ErrInvalidSystemCode = errors.New("system code must be lowercase letters, digits, '-' or '_', starting with a letter (max 100)")
 )
 
 // Service holds the tenant business rules.
@@ -30,58 +27,42 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// Create registers a tenant and returns its API key, which is shown only once.
-func (s *Service) Create(ctx context.Context, name string) (Created, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 100 {
-		return Created{}, ErrInvalidName
+var systemCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+
+// Provision returns the tenant of a system, creating it (active, named after the
+// system code) the first time the system is seen. Every system registered in
+// ATM-Auth-API may use this service, so nothing has to be set up beforehand.
+func (s *Service) Provision(ctx context.Context, systemCode string) (Tenant, error) {
+	if len(systemCode) > 100 || !systemCodePattern.MatchString(systemCode) {
+		return Tenant{}, ErrInvalidSystemCode
+	}
+	t, err := s.repo.FindBySystemCode(ctx, systemCode)
+	if err == nil {
+		return t, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return Tenant{}, err
 	}
 
-	key, prefix, hash, err := generateAPIKey()
-	if err != nil {
-		return Created{}, err
-	}
 	secret, err := generateWebhookSecret()
 	if err != nil {
-		return Created{}, err
+		return Tenant{}, err
 	}
-
 	id, err := uuid.NewV7()
 	if err != nil {
-		return Created{}, fmt.Errorf("generate tenant id: %w", err)
+		return Tenant{}, fmt.Errorf("generate tenant id: %w", err)
 	}
-	t := Tenant{ID: id, Name: name, APIKeyPrefix: prefix, WebhookSecret: secret, IsActive: true}
-	if err := s.repo.Create(ctx, t, hash); err != nil {
-		return Created{}, err
-	}
-	return Created{Tenant: t, APIKey: key}, nil
-}
-
-// Authenticate resolves the tenant that owns an API key.
-func (s *Service) Authenticate(ctx context.Context, apiKey string) (Tenant, error) {
-	if apiKey == "" {
-		return Tenant{}, ErrInvalidAPIKey
-	}
-	t, err := s.repo.FindByAPIKeyHash(ctx, HashAPIKey(apiKey))
-	if errors.Is(err, ErrNotFound) {
-		return Tenant{}, ErrInvalidAPIKey
-	}
-	if err != nil {
+	if _, err := s.repo.Create(ctx, Tenant{ID: id, Name: systemCode, SystemCode: systemCode, WebhookSecret: secret, IsActive: true}); err != nil {
 		return Tenant{}, err
 	}
-	if !t.IsActive {
-		return Tenant{}, ErrInvalidAPIKey
-	}
-	return t, nil
+	// Another request may have created it first; either way the stored one wins.
+	return s.repo.FindBySystemCode(ctx, systemCode)
 }
 
-var systemCodePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,49}$`)
-
-// AuthenticateSystem resolves the tenant linked to the system a service token
-// was issued to. Unknown or inactive tenants fail like an invalid credential.
-func (s *Service) AuthenticateSystem(ctx context.Context, systemCode string) (Tenant, error) {
-	t, err := s.repo.FindBySystemCode(ctx, systemCode)
-	if errors.Is(err, ErrNotFound) {
+// Authenticate returns the active tenant of the system a service token was issued to.
+func (s *Service) Authenticate(ctx context.Context, systemCode string) (Tenant, error) {
+	t, err := s.Provision(ctx, systemCode)
+	if errors.Is(err, ErrInvalidSystemCode) {
 		return Tenant{}, ErrInvalidCredentials
 	}
 	if err != nil {
@@ -93,14 +74,8 @@ func (s *Service) AuthenticateSystem(ctx context.Context, systemCode string) (Te
 	return t, nil
 }
 
-// SetSystemCode links the tenant to a system of ATM-Auth-API; an empty code unlinks it.
-func (s *Service) SetSystemCode(ctx context.Context, id uuid.UUID, code string) error {
-	code = strings.TrimSpace(code)
-	if code != "" && !systemCodePattern.MatchString(code) {
-		return ErrInvalidSystemCode
-	}
-	return s.repo.SetSystemCode(ctx, id, code)
-}
+// ErrInvalidCredentials: the service token is not valid, or its tenant is inactive.
+var ErrInvalidCredentials = errors.New("invalid credentials")
 
 // Get returns a tenant by ID.
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Tenant, error) {
@@ -113,7 +88,7 @@ func (s *Service) List(ctx context.Context) ([]Tenant, error) {
 }
 
 // Update renames a tenant and/or activates or deactivates it. An inactive
-// tenant's API key stops authenticating.
+// tenant's service token stops being accepted.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, name *string, isActive *bool) (Tenant, error) {
 	if name != nil {
 		trimmed := strings.TrimSpace(*name)
@@ -123,23 +98,6 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, name *string, isActi
 		name = &trimmed
 	}
 	return s.repo.Update(ctx, id, name, isActive)
-}
-
-// RotateAPIKey issues a new API key for the tenant. The old key stops working
-// immediately, and the new one is returned only here.
-func (s *Service) RotateAPIKey(ctx context.Context, id uuid.UUID) (Created, error) {
-	key, prefix, hash, err := generateAPIKey()
-	if err != nil {
-		return Created{}, err
-	}
-	if err := s.repo.ReplaceAPIKey(ctx, id, prefix, hash); err != nil {
-		return Created{}, err
-	}
-	t, err := s.repo.FindByID(ctx, id)
-	if err != nil {
-		return Created{}, err
-	}
-	return Created{Tenant: t, APIKey: key}, nil
 }
 
 // WebhookEndpoint returns where and with which secret a tenant's webhooks are

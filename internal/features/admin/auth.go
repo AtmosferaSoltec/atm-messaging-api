@@ -1,7 +1,7 @@
 // Package admin serves the administration API used by the React panel. There is
 // a single operator: its username and password come from the environment, with
 // no user table. Login exchanges them for a short-lived opaque token kept in
-// memory (a restart signs everyone out). Tenant API keys never work here.
+// memory (a restart signs everyone out). Service tokens never work here.
 package admin
 
 import (

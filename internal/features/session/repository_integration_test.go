@@ -48,7 +48,7 @@ func TestSessionRepositoryAgainstPostgres(t *testing.T) {
 		query string
 		args  []any
 	}{
-		{`INSERT INTO tenants (id, name, api_key_prefix, api_key_hash, webhook_secret) VALUES ($1, 'itest', 'atm_x', $2, 's')`, []any{tenantID, tenantID.String() + tenantID.String()[:28]}},
+		{`INSERT INTO tenants (id, name, system_code, webhook_secret) VALUES ($1, 'itest', $2, 's')`, []any{tenantID, "itest-" + tenantID.String()}},
 		{`INSERT INTO accounts (id, tenant_id, external_ref) VALUES ($1, $2, 'itest-account')`, []any{accountID, tenantID}},
 	} {
 		if _, err := pool.Exec(ctx, sql.query, sql.args...); err != nil {

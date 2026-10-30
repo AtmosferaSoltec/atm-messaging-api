@@ -1,6 +1,6 @@
 # atm-messaging-api
 
-Internal multi-tenant Go microservice. Other systems (SaaS, ERPs) call it to send messages to their customers through different channels. Not public: only consumed by our own systems, authenticated with an API key.
+Internal multi-tenant Go microservice. Other systems (SaaS, ERPs) call it to send messages to their customers through different channels. Not public: only consumed by our own systems, authenticated with their service token from ATM-Auth-API.
 
 Module: `github.com/AtmosferaSoltec/atm-messaging-api`.
 
@@ -15,7 +15,7 @@ First channel: unofficial WhatsApp (the business owner scans a QR like WhatsApp 
 
 ## Domain model
 
-- **Tenant**: one of our systems (e.g. La Vendimia). Has an API key (stored hashed), a webhook secret and plan/limits.
+- **Tenant**: one of our systems (e.g. La Vendimia). Identified by its system code in ATM-Auth-API. Created by this service itself (active) the first time the system presents its token: every system registered in auth may use it. Has a webhook secret and plan/limits.
 - **Account**: a business inside a tenant (e.g. one company of La Vendimia), identified by `external_ref` (its ID in the tenant's system).
 - **Session**: a channel connection of an account (e.g. its WhatsApp number). Belongs to tenant + account.
   **An account has at most ONE session per channel.** Unique on `(tenant_id, account_id, channel)`. A tenant with 10 accounts has 10 WhatsApp sessions; an account never has several WhatsApp numbers.
@@ -31,7 +31,7 @@ Business modules live in `internal/features/[module]/` (tenant, account, session
 - `internal/channel/`: `Channel` interface (Send, Status, ...), provider-agnostic. Future providers (email, SMS) implement it.
 - `internal/channel/whatsapp/`: whatsmeow implementation and a `SessionManager` (one client per session, reconnects on startup, emits events: QR, connected, disconnected, logged out, receipts). Nothing outside this package may import whatsmeow.
 - `internal/queue/`: `Runner`, one worker goroutine per session. The queue itself is the `messages` table (survives restarts); `internal/limits/` holds the pure sending policy (pacing, daily caps, warm-up).
-- `internal/features/tenant/`: API key auth, limits, quotas.
+- `internal/features/tenant/`: service-token auth, tenant provisioning, limits, quotas.
 - `internal/http/`: Gin handlers and middlewares (auth, request id, logging, recover).
 - Outgoing webhooks signed with HMAC-SHA256 (`X-Signature` header), with retries and backoff.
 
@@ -41,7 +41,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 
 ## Business rules
 
-- Everything is filtered by the `tenant_id` derived from the API key, never from a request parameter.
+- Everything is filtered by the `tenant_id` derived from the service token, never from a request parameter.
 - Idempotent sending by `(tenant_id, idempotency_key)`.
 - Per-session configurable limits: high for transactional; low for promotional, with random delay between messages (e.g. 8-20 s), daily cap and progressive warm-up for new numbers. These values are starting points, not official WhatsApp figures.
 - Promotional messages support opt-out (per-session unsubscribe list; never send to unsubscribed recipients).
@@ -50,24 +50,22 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 
 ## Security
 
-- Never log API keys, tokens or session credential contents.
-- API keys: shown once on creation, only the hash is stored.
+- Never log tokens or session credential contents.
 - Session files/DB hold customers' WhatsApp credentials: never commit them (`.gitignore`) and keep restricted permissions.
-- Admin panel uses authentication separate from API keys.
+- Admin panel uses authentication separate from service tokens.
 - Validate attachment size and type.
 
 ## Commands
 
 - `go run ./cmd/api migrate up|down|status` apply migrations (needs `DATABASE_URL`, see `.env.example`)
-- `go run ./cmd/api tenant create -name NAME` create a tenant; prints the API key and webhook secret once
 - `go run ./cmd/api serve` start the server (default command)
-- `ATM_API_KEY=... go run ./cmd/devqr -session <id>` draw the QR of a pending session
+- `ATM_TOKEN=<service token> go run ./cmd/devqr -session <id>` draw the QR of a pending session
 - `go test -race ./...` (los tests con base real se saltan si falta `TEST_DATABASE_URL`; para correrlos: `TEST_DATABASE_URL='postgresql://messaging_app:<clave>@localhost:5432/messaging_test?search_path=messaging' go test ./...`)
 
 ## Endpoints v1 (MVP)
 
 - `POST   /v1/sessions` create session (body: `account_ref`, `channel`; 409 if the account already has one for that channel)
-- Auth: `Authorization: Bearer <credential>` on everything under `/v1`. `GET /health` is public. The credential is the service token of ATM-Auth-API (`POST /v1/token`, subject `system:<code>`), validated locally with `AUTH_PUBLIC_KEY_BASE64` + `AUTH_ISSUER`; the tenant is the one whose `system_code` equals that code (link it with `PATCH /admin/v1/tenants/{id} {"system_code"}`). Legacy API keys (`atm_...`) still work while systems migrate.
+- Auth: `Authorization: Bearer <token>` on everything under `/v1`. `GET /health` is public. The token is the service token of ATM-Auth-API (`POST /v1/token`, subject `system:<code>`), validated locally with `AUTH_PUBLIC_KEY_BASE64` + `AUTH_ISSUER` (both required). The tenant is the one whose `system_code` equals that code; it is created on first use. `POST /admin/v1/tenants {system_code}` sets one up in advance (idempotent). There are no API keys.
 - Message types: `text`, `image` (jpeg/png/webp), `video` (mp4), `audio` (mp3/ogg, sent as an audio file, no caption) and `document` (pdf, docx, xlsx, pptx, txt, csv); max 16 MiB decoded. The file's real content must match its declared `mime_type`.
 - `POST /v1/messages` body: `account_ref`, `channel`, `to`, `type`, `body`, optional `priority`, `idempotency_key`, `attachment` `{filename, mime_type, content_base64}` (images jpeg/png/webp, documents pdf, max 16 MiB decoded)
 - `GET    /v1/sessions?account_ref=` list
@@ -78,7 +76,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 - `GET    /v1/messages/{id}` message status
 - `POST|GET /v1/sessions/{id}/opt-outs`, `DELETE /v1/sessions/{id}/opt-outs/{to}` manage the promotional unsubscribe list (promotional messages to them get 422)
 - Tenant webhook settings: `GET|PUT|DELETE /v1/webhook`, `POST /v1/webhook/test`, `GET /v1/webhook/events`
-- Admin API (`/admin/v1`, `Authorization: Bearer adm_...` from `POST /auth/login {username, password}`): `POST /auth/logout`, `GET /auth/me`; `GET|POST /tenants`, `GET|PATCH /tenants/{id}`, `POST /tenants/{id}/rotate-key`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `POST /messages` (the operator sends a test message through a connection: `session_id`, `to`, `type`, `body`, `priority`, `attachment`; same validation and queue as a tenant's) and `GET /messages/{id}` (status only); `GET /messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=` (never returns bodies; returns `has_more`); `GET /metrics[?tenant_id=]`; `GET /metrics/activity` (last 24 hours, hour by hour); `GET|PUT|DELETE /tenants/{id}/webhook` and `POST /tenants/{id}/webhook/test`. `GET /tenants` includes `sessions_count` and `messages_last_24h`; sessions include `phone`. Login is throttled (5 failures / 15 min per IP and per user).
+- Admin API (`/admin/v1`, `Authorization: Bearer adm_...` from `POST /auth/login {username, password}`): `POST /auth/logout`, `GET /auth/me`; `GET /tenants`, `POST /tenants {system_code}` (idempotent), `GET|PATCH /tenants/{id}`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `POST /messages` (the operator sends a test message through a connection: `session_id`, `to`, `type`, `body`, `priority`, `attachment`; same validation and queue as a tenant's) and `GET /messages/{id}` (status only); `GET /messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=` (never returns bodies; returns `has_more`); `GET /metrics[?tenant_id=]`; `GET /metrics/activity` (last 24 hours, hour by hour); `GET|PUT|DELETE /tenants/{id}/webhook` and `POST /tenants/{id}/webhook/test`. `GET /tenants` includes `sessions_count` and `messages_last_24h`; sessions include `phone`. Login is throttled (5 failures / 15 min per IP and per user).
 - Public connect page API (no auth; the token in the URL is the credential): `GET /public/connect/{token}` (label, channel, status, expiry; no internal ids) and `GET /public/connect/{token}/qr/stream` (SSE: `qr`, `connected`, `closed`). Links are 256-bit random, stored hashed, expire (`CONNECT_LINK_TTL`, default 24h), belong to one session and can do nothing else. Opening the stream of an unlinked session starts a new pairing.
 - Webhooks: `session.connected`, `session.disconnected`, `message.sent`, `message.delivered`, `message.read`, `message.failed`
 
@@ -89,10 +87,10 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 ## Phases (keep the order)
 
 1. ~~Spike~~ (done): QR in terminal, persisted session, text + PDF sent, survives restart without rescanning.
-2. Multi-session SessionManager + Gin API (create session, QR over SSE, send) with per-tenant API key. (implemented; sends directly, no queue yet)
+2. Multi-session SessionManager + Gin API (create session, QR over SSE, send) with per-system service token. (implemented; sends directly, no queue yet)
 3. ~~Per-session queue with rate limiting and retries~~ (implemented, untested with a real phone): the queue is the `messages` table; `message.Dispatcher` runs one `queue.Runner` worker per session; sending policy in `internal/limits` (env `LIMITS_*`, `QUEUE_*`, see `.env.example`); opt-outs in `internal/features/optout`.
 4. ~~Signed webhooks and message statuses~~ (implemented, untested with a real phone): `internal/features/webhook` is an outbox (table `webhook_events`) with one worker per tenant, HMAC-SHA256 signing, exponential retries and an SSRF-safe HTTP client; delivered/read receipts update messages.
-5. ~~Admin endpoints for the React panel~~ (implemented): `/admin/v1` with a single operator whose `ADMIN_USER`/`ADMIN_PASSWORD` live in `.env` (no user table, no JWT); login returns an opaque in-memory token (`adm_...`), separate from tenant API keys. Customers never get an account: the operator sends them a public connect link (`/public/connect/{token}`, see below).
+5. ~~Admin endpoints for the React panel~~ (implemented): `/admin/v1` with a single operator whose `ADMIN_USER`/`ADMIN_PASSWORD` live in `.env` (no user table, no JWT); login returns an opaque in-memory token (`adm_...`), separate from service tokens. Customers never get an account: the operator sends them a public connect link (`/public/connect/{token}`, see below).
 
 **Before each phase, propose the plan in a few lines and wait for approval.**
 
