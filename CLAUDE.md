@@ -103,7 +103,7 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 
 ## Deploy
 
-Branches: work on `main`; merging into `production` triggers the GitHub Actions deploy (check → build → deploy over SSH). Domains `messaging-api.atmosferast.com` / `messaging.atmosferast.com`, folder `/opt/messaging-api`. Full guide, server setup and operating notes: [docs/despliegue.md](docs/despliegue.md). The production `.env` lives only on the server (template: `deploy/.env.production.example`).
+Branches: work on `main`; merging into `production` triggers the GitHub Actions deploy (check → build → deploy over SSH). Domain `messaging.atmosferast.com` (no web of its own: the console administers it), folder `/opt/messaging-api`. Full guide, server setup and operating notes: [docs/despliegue.md](docs/despliegue.md). The production `.env` lives only on the server (template: `deploy/.env.production.example`).
 
 ## Development rules
 

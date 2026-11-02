@@ -14,14 +14,31 @@ server {
 	ssl_certificate     /etc/ssl/atmosferast/origin.pem;
 	ssl_certificate_key /etc/ssl/atmosferast/origin.key;
 
-	# The container messaging-web serves the static web app. It talks to the API
-	# domain directly (messaging-api.atmosferast.com), allowed by the API's CORS.
-	location / {
-		proxy_pass http://127.0.0.1:3120;
+	# Messages carry attachments as base64 inside the JSON (up to 16 MiB of file).
+	client_max_body_size 25m;
+
+	# QR streams (Server-Sent Events): never buffer them and let them stay open.
+	location ~ ^/(public/connect/[^/]+|v1/sessions/[^/]+)/qr/stream$ {
+		proxy_pass http://127.0.0.1:3121;
 		proxy_http_version 1.1;
 		proxy_set_header Host $host;
-		proxy_set_header X-Real-IP $remote_addr;
-		proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+		proxy_set_header X-Real-IP $messaging_client_ip;
+		proxy_set_header X-Forwarded-For $messaging_client_ip;
 		proxy_set_header X-Forwarded-Proto $scheme;
+		proxy_set_header Connection "";
+		proxy_buffering off;
+		proxy_cache off;
+		proxy_read_timeout 1h;
+	}
+
+	location / {
+		proxy_pass http://127.0.0.1:3121;
+		proxy_http_version 1.1;
+		proxy_set_header Host $host;
+		proxy_set_header X-Real-IP $messaging_client_ip;
+		proxy_set_header X-Forwarded-For $messaging_client_ip;
+		proxy_set_header X-Forwarded-Proto $scheme;
+		proxy_set_header Connection "";
+		proxy_read_timeout 60s;
 	}
 }

@@ -3,18 +3,19 @@
 Mismo esquema que Orbita: imagen Docker construida en GitHub Actions → GHCR → el VPS la
 descarga por SSH con `docker compose`. El servidor nunca compila.
 
-| | API | Web |
-|---|---|---|
-| Repo | `atm-messaging-api` | `atm-messaging-web` |
-| Dominio | `messaging-api.atmosferast.com` | `messaging.atmosferast.com` |
-| Carpeta en el VPS | `/opt/messaging-api` | `/opt/messaging-web` |
-| Contenedor | `messaging-api` (puerto interno 8080) | `messaging-web` (puerto interno 8080) |
-| Puerto en loopback | `127.0.0.1:3121` | `127.0.0.1:3120` |
-| Imagen | `ghcr.io/atmosferasoltec/atm-messaging-api` | `ghcr.io/atmosferasoltec/atm-messaging-web` |
+| | API |
+|---|---|
+| Repo | `atm-messaging-api` |
+| Dominio | `messaging.atmosferast.com` |
+| Carpeta en el VPS | `/opt/messaging-api` |
+| Contenedor | `messaging-api` (puerto interno 8080) |
+| Puerto en loopback | `127.0.0.1:3121` |
+| Imagen | `ghcr.io/atmosferasoltec/atm-messaging-api` |
 
-El nginx del host publica los dominios con el certificado de origen de Cloudflare
-(`/etc/ssl/atmosferast/origin.pem`, cubre `*.atmosferast.com`). La web habla con el API por su
-dominio (no hay proxy `/api`): el origen de la web está permitido por CORS en el API.
+El nginx del host publica el dominio con el certificado de origen de Cloudflare
+(`/etc/ssl/atmosferast/origin.pem`, cubre `*.atmosferast.com`). La consola (`console.atmosferast.com`)
+no usa este dominio: su nginx reenvía `/messaging-api/` a `127.0.0.1:3121`, mismo origen y sin CORS.
+Ya no hay web propia (`atm-messaging-web` se retiró): se administra desde la consola.
 
 ## Cómo se despliega
 
@@ -40,7 +41,7 @@ con la versión anterior mientras corre (primero agregar, después quitar).
   demás proyectos (`scripts/provision-db.sql`; el rol no puede usar `public` ni conectarse a otras
   bases, y ningún otro rol puede conectarse a esta). La clave se generó al crearla y está solo en
   el `.env` del servidor.
-- **Carpetas** `/opt/messaging-api` y `/opt/messaging-web` (dueño `deploy`).
+- **Carpeta** `/opt/messaging-api` (dueño `deploy`).
 - **nginx del host**: `deploy/host-nginx/` tiene los dos vhosts y el `map` de la IP real del visitante
   (Cloudflare). Se instalan en `/etc/nginx/sites-available` (+ symlink en `sites-enabled`) y
   `/etc/nginx/conf.d`. El vhost del API desactiva el buffering de los streams SSE del QR.
@@ -65,7 +66,7 @@ fallar definitivamente. Si el contenedor se detiene, los correos pendientes se e
 
 ```bash
 docker ps --filter name=messaging              # ambos "healthy"
-curl https://messaging-api.atmosferast.com/health   # {"status":"ok"}
+curl https://messaging.atmosferast.com/health   # {"status":"ok"}
 ```
 
 Entrar a https://console.atmosferast.com como superadmin, abrir Mensajería, crear una conexión
