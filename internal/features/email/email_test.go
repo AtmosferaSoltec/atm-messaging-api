@@ -100,7 +100,6 @@ type fakeRepo struct {
 	mu      sync.Mutex
 	emails  map[uuid.UUID]*Email
 	order   []uuid.UUID
-	counts  int
 	blanked map[uuid.UUID]bool
 }
 

@@ -2,6 +2,7 @@ package email
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -68,7 +69,7 @@ func TestEmailRepositoryAgainstPostgres(t *testing.T) {
 	if err != nil || created || again.ID != first.ID {
 		t.Fatalf("idempotent insert: %+v %v %v", again, created, err)
 	}
-	if _, err := repo.Get(ctx, uuid.New(), first.ID); err != ErrNotFound {
+	if _, err := repo.Get(ctx, uuid.New(), first.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("other tenant must get not found, got %v", err)
 	}
 	if n, err := repo.CountToAddressSince(ctx, tenantID, "ana@example.com", time.Now().Add(-time.Hour)); err != nil || n != 1 {
