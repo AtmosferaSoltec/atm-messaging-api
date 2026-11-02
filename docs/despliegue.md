@@ -52,6 +52,15 @@ con la versión anterior mientras corre (primero agregar, después quitar).
   nano /opt/messaging-api/.env
   ```
 
+## Correo transaccional
+
+`POST /v1/email` envía correo con Resend desde una cola en la base (tabla `email_messages`). En el `.env`
+del servidor: `RESEND_API_KEY` y `MAIL_FROM` (dominio verificado en Resend, p. ej.
+`Atmosfera <no-reply@atmosferast.com>`). Si falta `RESEND_API_KEY` el servicio arranca igual y WhatsApp
+funciona, pero `POST /v1/email` responde 503 `email_unavailable`. Reintentos: `EMAIL_MAX_ATTEMPTS` (5) y
+`EMAIL_RETRY_BASE` (30s, se duplica). Los códigos de recuperación se borran de la base al enviarse o al
+fallar definitivamente. Si el contenedor se detiene, los correos pendientes se envían al volver a arrancar.
+
 ## Después del primer despliegue
 
 ```bash

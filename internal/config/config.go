@@ -30,6 +30,17 @@ type Webhook struct {
 	AllowPrivate bool
 }
 
+// Email configures transactional email delivery.
+type Email struct {
+	// ResendAPIKey enables the Resend provider. Empty: development logs emails,
+	// production answers POST /v1/email with 503.
+	ResendAPIKey string
+	// From is the sender address, e.g. "Atmosfera <no-reply@atmosferast.com>".
+	From        string
+	MaxAttempts int
+	RetryBase   time.Duration
+}
+
 // Auth is the public key and issuer of ATM-Auth-API.
 type Auth struct {
 	PublicKeyBase64 string
@@ -57,6 +68,7 @@ type Config struct {
 	Limits      limits.Policy
 	Queue       Queue
 	Webhook     Webhook
+	Email       Email
 	Web         Web
 	// Auth is how the service validates the service tokens of ATM-Auth-API.
 	Auth Auth
@@ -92,6 +104,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.Webhook = webhook
+
+	email, err := loadEmail()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Email = email
 
 	cfg.Auth = Auth{PublicKeyBase64: os.Getenv("AUTH_PUBLIC_KEY_BASE64"), Issuer: os.Getenv("AUTH_ISSUER")}
 	if !cfg.Auth.Enabled() {
@@ -196,6 +214,28 @@ func loadWebhook(env string) (Webhook, error) {
 		return Webhook{}, errors.New("invalid WEBHOOK_* settings: values must be positive")
 	}
 	return webhook, nil
+}
+
+func loadEmail() (Email, error) {
+	email := Email{
+		ResendAPIKey: strings.TrimSpace(os.Getenv("RESEND_API_KEY")),
+		From:         strings.TrimSpace(os.Getenv("MAIL_FROM")),
+		MaxAttempts:  5,
+		RetryBase:    30 * time.Second,
+	}
+	if err := envDuration("EMAIL_RETRY_BASE", &email.RetryBase); err != nil {
+		return Email{}, err
+	}
+	if err := envInt("EMAIL_MAX_ATTEMPTS", &email.MaxAttempts); err != nil {
+		return Email{}, err
+	}
+	if email.MaxAttempts < 1 || email.RetryBase <= 0 {
+		return Email{}, errors.New("invalid EMAIL_* settings: values must be positive")
+	}
+	if email.ResendAPIKey != "" && email.From == "" {
+		return Email{}, errors.New("MAIL_FROM is required when RESEND_API_KEY is set")
+	}
+	return email, nil
 }
 
 // envDuration overrides dest with the variable's value (e.g. "8s"), if set.

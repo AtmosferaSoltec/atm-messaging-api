@@ -121,3 +121,22 @@ func TestWebDefaultsAreSafe(t *testing.T) {
 		t.Errorf("connect links last 24h by default, got %v", cfg.Web.ConnectLinkTTL)
 	}
 }
+
+func TestLoadEmail(t *testing.T) {
+	setRequired(t)
+	cfg, err := Load()
+	if err != nil || cfg.Email.ResendAPIKey != "" || cfg.Email.MaxAttempts != 5 || cfg.Email.RetryBase != 30*time.Second {
+		t.Fatalf("defaults: %+v %v", cfg.Email, err)
+	}
+	t.Setenv("RESEND_API_KEY", "key")
+	if _, err := Load(); err == nil {
+		t.Error("MAIL_FROM must be required with RESEND_API_KEY")
+	}
+	t.Setenv("MAIL_FROM", "Atmosfera <no-reply@atmosferast.com>")
+	t.Setenv("EMAIL_MAX_ATTEMPTS", "2")
+	t.Setenv("EMAIL_RETRY_BASE", "1m")
+	cfg, err = Load()
+	if err != nil || cfg.Email.MaxAttempts != 2 || cfg.Email.RetryBase != time.Minute {
+		t.Fatalf("overrides: %+v %v", cfg.Email, err)
+	}
+}

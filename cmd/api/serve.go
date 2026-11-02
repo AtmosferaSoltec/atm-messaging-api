@@ -16,6 +16,7 @@ import (
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/account"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/admin"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/connect"
+	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/email"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/message"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/optout"
 	"github.com/AtmosferaSoltec/atm-messaging-api/internal/features/session"
@@ -92,6 +93,26 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 
+	// Email: without RESEND_API_KEY, development logs emails and production keeps
+	// running (WhatsApp unaffected) but refuses POST /v1/email with 503.
+	emailRepo := email.NewRepository(pool)
+	var emailSender email.Sender
+	switch {
+	case cfg.Email.ResendAPIKey != "":
+		emailSender = email.NewResendSender(cfg.Email.ResendAPIKey, cfg.Email.From)
+	case cfg.Env != "production":
+		emailSender = email.LogSender{Log: log}
+	}
+	emailWorker := email.NewWorker(emailRepo, emailSender, email.WorkerConfig{
+		MaxAttempts: cfg.Email.MaxAttempts, RetryBase: cfg.Email.RetryBase,
+	}, log)
+	emails := email.NewService(emailRepo, emailWorker, emailSender != nil)
+	if emailSender != nil {
+		emailWorker.Start(ctx)
+	} else {
+		log.Warn("email disabled: RESEND_API_KEY is not set")
+	}
+
 	server, err := httpserver.New(cfg.HTTPPort, cfg.Env == "production", cfg.TrustedProxies, log)
 	if err != nil {
 		return err
@@ -117,6 +138,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	session.RegisterRoutes(v1, session.NewHandler(sessions))
 	message.RegisterRoutes(v1, message.NewHandler(messages))
 	optout.RegisterRoutes(v1, optout.NewHandler(optOuts))
+	emailHandler := email.NewHandler(emails)
+	email.RegisterRoutes(v1, emailHandler)
 	webhook.RegisterRoutes(v1, webhook.NewHandler(webhooks))
 
 	// Public links let a customer scan a QR code; the token in the URL is the credential.
@@ -124,13 +147,16 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	connect.RegisterRoutes(engine.Group("/public", cors), connect.NewHandler(connectLinks))
 
 	adminHandler := admin.NewHandler(tenants, sessions, messages, webhooks, connectLinks, cfg.Web.URL)
-	admin.RegisterRoutes(engine.Group("/admin/v1", cors), adminHandler, verifier)
+	adminGroup := engine.Group("/admin/v1", cors)
+	admin.RegisterRoutes(adminGroup, adminHandler, verifier)
+	email.RegisterAdminRoutes(adminGroup.Group("", admin.RequireAdmin(verifier)), emailHandler)
 
 	runErr := server.Run(ctx)
 
 	// Let the send in progress be recorded before dropping the connections.
 	dispatcher.Stop()
 	webhookDispatcher.Stop()
+	emailWorker.Stop()
 	whatsappChannel.Close()
 	if runErr != nil {
 		return fmt.Errorf("serve: %w", runErr)

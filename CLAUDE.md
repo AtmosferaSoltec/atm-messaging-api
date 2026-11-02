@@ -4,13 +4,14 @@ Internal multi-tenant Go microservice. Other systems (SaaS, ERPs) call it to sen
 
 Module: `github.com/AtmosferaSoltec/atm-messaging-api`.
 
-First channel: unofficial WhatsApp (the business owner scans a QR like WhatsApp Web; the service sends text, images and PDFs from that number). Later: email (Resend, Brevo) and SMS. Only WhatsApp is implemented for now.
+First channel: unofficial WhatsApp (the business owner scans a QR like WhatsApp Web; the service sends text, images and PDFs from that number). Also transactional email through Resend (`internal/features/email`, separate from the WhatsApp session model). Later: SMS.
 
 ## Stack
 
 - Go (current), Gin for HTTP
 - whatsmeow (`go.mau.fi/whatsmeow`) for WhatsApp. Check its current API in the official repo before writing code; it changes between versions.
 - PostgreSQL everywhere, in the shared `atmosfera-postgres` container: own database `messaging`, own role `messaging_app`, own schema `messaging` (provisioned by `atmosfera-postgres/initdb/05-messaging.sh`). `pgx/v5` + `goose` migrations (`db/migrations/`). Repositories are interfaces, so the domain does not depend on the engine.
+- Email: Resend over plain `net/http` (no SDK), behind the `email.Sender` interface; templates are `html/template` (compiled HTML embedded in the binary, es-PE).
 - Redis optional later; start with an in-memory queue + persistence in the DB
 
 ## Domain model
@@ -76,7 +77,8 @@ Note: auth middleware lives in `internal/features/tenant/`, and each feature reg
 - `GET    /v1/messages/{id}` message status
 - `POST|GET /v1/sessions/{id}/opt-outs`, `DELETE /v1/sessions/{id}/opt-outs/{to}` manage the promotional unsubscribe list (promotional messages to them get 422)
 - Tenant webhook settings: `GET|PUT|DELETE /v1/webhook`, `POST /v1/webhook/test`, `GET /v1/webhook/events`
-- Admin API (`/admin/v1`, `Authorization: Bearer <access token of an ATM-Auth-API superadmin>`; service tokens and ordinary users get 403; no login here): `GET /tenants`, `POST /tenants {system_code}` (idempotent), `GET|PATCH /tenants/{id}`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `POST /messages` (the operator sends a test message through a connection: `session_id`, `to`, `type`, `body`, `priority`, `attachment`; same validation and queue as a tenant's) and `GET /messages/{id}` (status only); `GET /messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=` (never returns bodies; returns `has_more`); `GET /metrics[?tenant_id=]`; `GET /metrics/activity` (last 24 hours, hour by hour); `GET|PUT|DELETE /tenants/{id}/webhook` and `POST /tenants/{id}/webhook/test`. `GET /tenants` includes `sessions_count` and `messages_last_24h`; sessions include `phone`. Login is throttled (5 failures / 15 min per IP and per user).
+- `POST   /v1/email` body: `to`, `template` (`password_reset_code` data `{name?, code (6 digits), expires_minutes (1-60)}`; `password_changed` data `{name?}`), optional `idempotency_key` (max 128); responds 202 `{id, status:"queued"}`. Errors: 422 `unknown_template`/`invalid_data`/`invalid_recipient`, 429 `rate_limited` (60/min per tenant, 5/hour per tenant+address), 503 `email_unavailable` (no `RESEND_API_KEY`). `GET /v1/email/{id}` returns `{id, to, template, status, attempts, last_error, created_at, sent_at}` for the caller's tenant only. Statuses: queued, sending, sent, failed. The queue is the `email_messages` table, worker with `FOR UPDATE SKIP LOCKED`, exponential retries (`EMAIL_MAX_ATTEMPTS`, `EMAIL_RETRY_BASE`); the `data` of a `password_reset_code` is blanked once the email is sent or has failed for good. Config: `RESEND_API_KEY`, `MAIL_FROM`.
+- Admin API (`/admin/v1`, `Authorization: Bearer <access token of an ATM-Auth-API superadmin>`; service tokens and ordinary users get 403; no login here): `GET /tenants`, `POST /tenants {system_code}` (idempotent), `GET|PATCH /tenants/{id}`, `PUT|DELETE /tenants/{id}/webhook`, `GET /tenants/{id}/webhook/events`; `GET|POST /sessions` (POST takes `tenant_id`, `account_ref`, `channel`), `GET|DELETE /sessions/{id}`, `POST /sessions/{id}/connect-link {label?}` (returns the shareable URL once; replaces the previous link), `POST /sessions/{id}/disconnect` (unlink the number, keep the session, ready for a new QR); `POST /messages` (the operator sends a test message through a connection: `session_id`, `to`, `type`, `body`, `priority`, `attachment`; same validation and queue as a tenant's) and `GET /messages/{id}` (status only); `GET /messages?tenant_id=&session_id=&status=&priority=&q=&limit=&offset=` (never returns bodies; returns `has_more`); `GET /metrics[?tenant_id=]`; `GET /metrics/activity` (last 24 hours, hour by hour); `GET /email/metrics` (emails of the last 24 hours per tenant and status); `GET|PUT|DELETE /tenants/{id}/webhook` and `POST /tenants/{id}/webhook/test`. `GET /tenants` includes `sessions_count` and `messages_last_24h`; sessions include `phone`. Login is throttled (5 failures / 15 min per IP and per user).
 - Public connect page API (no auth; the token in the URL is the credential): `GET /public/connect/{token}` (label, channel, status, expiry; no internal ids) and `GET /public/connect/{token}/qr/stream` (SSE: `qr`, `connected`, `closed`). Links are 256-bit random, stored hashed, expire (`CONNECT_LINK_TTL`, default 24h), belong to one session and can do nothing else. Opening the stream of an unlinked session starts a new pairing.
 - Webhooks: `session.connected`, `session.disconnected`, `message.sent`, `message.delivered`, `message.read`, `message.failed`
 
@@ -115,4 +117,4 @@ Branches: work on `main`; merging into `production` triggers the GitHub Actions 
 
 ## Out of scope for now
 
-Email, SMS, official WhatsApp API, multi-instance, billing. Keep the `Channel` interface ready but do not implement them.
+SMS, official WhatsApp API, multi-instance, billing. Keep the `Channel` interface ready but do not implement them.
